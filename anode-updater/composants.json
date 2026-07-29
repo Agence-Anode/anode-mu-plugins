@@ -1,0 +1,12 @@
+{
+  "_lisezmoi": "Source de vérité des composants suivis. Lu par anode-updater (sur les sites) et par bin/release-mu-plugin.mjs (à la publication) : une seule liste, donc pas de dérive entre ce qui est publié et ce qui est attendu. « chemin » est le dossier dans le dépôt, à omettre quand le dépôt ne contient qu'un composant — il détermine le préfixe des tags.",
+  "composants": {
+    "anode-hardening": { "repo": "theoanode/anode-mu-plugins", "chemin": "anode-hardening", "source": "blueprint/mu-plugins/anode-hardening" },
+    "anode-cache": { "repo": "theoanode/anode-mu-plugins", "chemin": "anode-cache", "source": "blueprint/mu-plugins/anode-cache" },
+    "anode-seo": { "repo": "theoanode/anode-mu-plugins", "chemin": "anode-seo", "source": "blueprint/mu-plugins/anode-seo" },
+    "anode-forms": { "repo": "theoanode/anode-mu-plugins", "chemin": "anode-forms", "source": "blueprint/mu-plugins/anode-forms" },
+    "anode-redirections": { "repo": "theoanode/anode-mu-plugins", "chemin": "anode-redirections", "source": "blueprint/mu-plugins/anode-redirections" },
+    "anode-updater": { "repo": "theoanode/anode-mu-plugins", "chemin": "anode-updater", "source": "blueprint/mu-plugins/anode-updater" },
+    "anode-bridge": { "repo": "theoanode/anode-bridge", "source": "plugin/anode-bridge" }
+  }
+}
