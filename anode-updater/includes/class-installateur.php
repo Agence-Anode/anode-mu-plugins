@@ -40,7 +40,7 @@ final class Installateur {
 			);
 		}
 
-		$fichier = Source::telecharger( (string) $archive['archive']['browser_download_url'] );
+		$fichier = Source::telecharger( (string) $archive['archive']['url'] );
 
 		if ( is_wp_error( $fichier ) ) {
 			return $fichier;
@@ -93,7 +93,7 @@ final class Installateur {
 			return true;
 		}
 
-		$publiee = Source::telecharger( (string) $empreinte['browser_download_url'] );
+		$publiee = Source::telecharger( (string) $empreinte['url'] );
 
 		if ( is_wp_error( $publiee ) ) {
 			return true;

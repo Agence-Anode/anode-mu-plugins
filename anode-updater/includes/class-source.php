@@ -81,20 +81,29 @@ final class Source {
 	}
 
 	/**
-	 * Télécharge un fichier et renvoie son chemin local.
+	 * Télécharge un fichier d'une release et renvoie son chemin local.
+	 *
+	 * L'URL attendue est celle de **l'API** (`…/releases/assets/<id>`), pas le
+	 * `browser_download_url` : celui-ci passe par github.com, qui ignore le jeton
+	 * d'API et répond 404 sur un dépôt privé. Constaté en installant pour de
+	 * vrai — la lecture des releases fonctionnait, le téléchargement non.
+	 *
+	 * En deux temps, et c'est nécessaire : l'API répond par une redirection vers
+	 * un stockage d'objets qui **refuse** une requête portant déjà un en-tête
+	 * d'authentification. On récupère donc la redirection, puis on la suit sans
+	 * en-tête.
 	 *
 	 * @return string|\WP_Error
 	 */
 	public static function telecharger( string $url ) {
 		require_once ABSPATH . 'wp-admin/includes/file.php';
 
-		// download_url ne transmet pas d'en-tête d'authentification : pour un
-		// dépôt privé, l'URL d'un asset exige le jeton et un Accept particulier.
 		$reponse = wp_remote_get(
 			$url,
 			self::arguments( [
-				'timeout'  => 120,
-				'headers'  => [ 'Accept' => 'application/octet-stream' ],
+				'timeout'     => 120,
+				'redirection' => 0,
+				'headers'     => [ 'Accept' => 'application/octet-stream' ],
 			] )
 		);
 
@@ -102,10 +111,29 @@ final class Source {
 			return $reponse;
 		}
 
-		if ( 200 !== wp_remote_retrieve_response_code( $reponse ) ) {
+		$code = wp_remote_retrieve_response_code( $reponse );
+
+		if ( in_array( $code, [ 301, 302, 307 ], true ) ) {
+			$destination = wp_remote_retrieve_header( $reponse, 'location' );
+
+			if ( ! $destination ) {
+				return new \WP_Error( 'anode_updater_redirection', 'Redirection sans destination lors du téléchargement.' );
+			}
+
+			// Sans en-tête d'authentification : le stockage signe l'URL lui-même.
+			$reponse = wp_remote_get( $destination, [ 'timeout' => 120, 'redirection' => 5 ] );
+
+			if ( is_wp_error( $reponse ) ) {
+				return $reponse;
+			}
+
+			$code = wp_remote_retrieve_response_code( $reponse );
+		}
+
+		if ( 200 !== $code ) {
 			return new \WP_Error(
 				'anode_updater_telechargement',
-				sprintf( 'Téléchargement refusé (%d) : %s', wp_remote_retrieve_response_code( $reponse ), $url )
+				sprintf( 'Téléchargement refusé (%d) : %s', $code, $url )
 			);
 		}
 

@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Anode — mises à jour
  * Description: Tient à jour les mu-plugins maison depuis leurs dépôts GitHub. Vérifie chaque jour, applique les correctifs et les versions mineures, retient les majeures.
- * Version:     1.0.0
+ * Version:     1.0.1
  * Author:      Anode
  * Requires PHP: 8.1
  *
@@ -56,7 +56,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 
 final class Updater {
 
-	public const VERSION = '1.0.0';
+	public const VERSION = '1.0.1';
 
 	/** Où l'on retient le résultat de la dernière vérification. */
 	public const OPTION_ETAT = 'anode_updater_etat';
@@ -236,7 +236,10 @@ final class Updater {
 	 * entière du dépôt sous un dossier horodaté, donc rien qu'on puisse installer
 	 * sans deviner.
 	 *
-	 * @param array<int, array{name?: string, browser_download_url?: string}> $assets
+	 * Seule l'URL d'API (`url`) est retenue : `browser_download_url` passe par
+	 * github.com, qui ignore le jeton et répond 404 sur un dépôt privé.
+	 *
+	 * @param array<int, array{name?: string, url?: string}> $assets
 	 */
 	public static function archive( array $assets, string $nom, string $version ): ?array {
 		$attendu   = sprintf( '%s-%s.zip', $nom, $version );
@@ -246,11 +249,11 @@ final class Updater {
 		foreach ( $assets as $asset ) {
 			$fichier = (string) ( $asset['name'] ?? '' );
 
-			if ( $fichier === $attendu ) {
+			if ( $fichier === $attendu && ! empty( $asset['url'] ) ) {
 				$archive = $asset;
 			}
 
-			if ( $fichier === $attendu . '.sha256' ) {
+			if ( $fichier === $attendu . '.sha256' && ! empty( $asset['url'] ) ) {
 				$empreinte = $asset;
 			}
 		}

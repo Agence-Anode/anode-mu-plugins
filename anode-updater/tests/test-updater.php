@@ -145,31 +145,40 @@ echo "\nChoix de l'archive\n";
 
 test( 'l’archive attendue porte le nom et la version du composant', function (): void {
 	$assets = [
-		[ 'name' => 'anode-cache-1.2.0.zip', 'browser_download_url' => 'https://exemple/a.zip' ],
-		[ 'name' => 'anode-cache-1.2.0.zip.sha256', 'browser_download_url' => 'https://exemple/a.sha' ],
-		[ 'name' => 'anode-seo-1.2.0.zip', 'browser_download_url' => 'https://exemple/b.zip' ],
+		[ 'name' => 'anode-cache-1.2.0.zip', 'url' => 'https://api/a', 'browser_download_url' => 'https://exemple/a.zip' ],
+		[ 'name' => 'anode-cache-1.2.0.zip.sha256', 'url' => 'https://api/a.sha', 'browser_download_url' => 'https://exemple/a.sha' ],
+		[ 'name' => 'anode-seo-1.2.0.zip', 'url' => 'https://api/b', 'browser_download_url' => 'https://exemple/b.zip' ],
 	];
 
 	$trouve = Updater::archive( $assets, 'anode-cache', '1.2.0' );
 
 	assert_that( null !== $trouve, 'archive non trouvée' );
-	assert_same( 'https://exemple/a.zip', $trouve['archive']['browser_download_url'] );
-	assert_same( 'https://exemple/a.sha', $trouve['empreinte']['browser_download_url'] );
+	assert_same( 'https://api/a', $trouve['archive']['url'] );
+	assert_same( 'https://api/a.sha', $trouve['empreinte']['url'] );
 } );
 
 test( 'sans empreinte publiée, l’archive reste installable', function (): void {
-	$trouve = Updater::archive( [ [ 'name' => 'anode-seo-2.0.0.zip', 'browser_download_url' => 'u' ] ], 'anode-seo', '2.0.0' );
+	$trouve = Updater::archive( [ [ 'name' => 'anode-seo-2.0.0.zip', 'url' => 'https://api/u' ] ], 'anode-seo', '2.0.0' );
 
 	assert_that( null !== $trouve );
 	assert_same( null, $trouve['empreinte'] );
+} );
+
+test( 'un asset sans URL d’API est refusé', function (): void {
+	// C'est le défaut qui a cassé la première installation réelle :
+	// browser_download_url passe par github.com, qui ignore le jeton et répond
+	// 404 sur un dépôt privé. Seule l'URL d'API est utilisable.
+	$assets = [ [ 'name' => 'anode-cache-1.2.0.zip', 'browser_download_url' => 'https://exemple/a.zip' ] ];
+
+	assert_same( null, Updater::archive( $assets, 'anode-cache', '1.2.0' ) );
 } );
 
 test( 'le zip de source généré par GitHub n’est jamais retenu', function (): void {
 	// Il contient l'arborescence entière du dépôt sous un dossier horodaté :
 	// rien qu'on puisse installer sans deviner.
 	$assets = [
-		[ 'name' => 'Source code (zip)', 'browser_download_url' => 'https://exemple/src.zip' ],
-		[ 'name' => 'anode-cache-1.1.0.zip', 'browser_download_url' => 'https://exemple/vieux.zip' ],
+		[ 'name' => 'Source code (zip)', 'url' => 'https://api/src' ],
+		[ 'name' => 'anode-cache-1.1.0.zip', 'url' => 'https://api/vieux' ],
 	];
 
 	assert_same( null, Updater::archive( $assets, 'anode-cache', '1.2.0' ), 'mauvaise version acceptée :' );
