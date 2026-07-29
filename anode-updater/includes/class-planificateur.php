@@ -139,7 +139,7 @@ final class Planificateur {
 			];
 		}
 
-		$resultat = Installateur::installer( $nom, $composant, $derniere['release'], $publiee );
+		$resultat = Installateur::installer( $nom, $derniere['release'], $publiee );
 
 		if ( is_wp_error( $resultat ) ) {
 			return [
@@ -198,7 +198,7 @@ final class Planificateur {
 				continue;
 			}
 
-			$resultat = Installateur::installer( $nom, $composants[ $nom ], $derniere['release'], $derniere['version'] );
+			$resultat = Installateur::installer( $nom, $derniere['release'], $derniere['version'] );
 
 			$etat['composants'][ $nom ] = is_wp_error( $resultat )
 				? [ 'etat' => 'echec', 'publiee' => $derniere['version'], 'message' => $resultat->get_error_message() ]

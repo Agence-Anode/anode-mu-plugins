@@ -25,7 +25,7 @@ final class Installateur {
 	 *
 	 * @return true|\WP_Error
 	 */
-	public static function installer( string $nom, array $composant, array $release, string $version ) {
+	public static function installer( string $nom, array $release, string $version ) {
 		$archive = Updater::archive( (array) ( $release['assets'] ?? [] ), $nom, $version );
 
 		if ( null === $archive ) {
@@ -229,6 +229,8 @@ final class Installateur {
 			return new \WP_Error( 'anode_updater_copie', sprintf( 'Impossible d’installer %s : l’ancienne version a été remise.', $nom ) );
 		}
 
+		self::elaguer( $archives, $nom, $precedente );
+
 		/**
 		 * Un composant vient d'être mis à jour.
 		 *
@@ -238,6 +240,27 @@ final class Installateur {
 		do_action( 'anode/updater/installe', $nom, $version, $precedente );
 
 		return true;
+	}
+
+	/**
+	 * Ne garde qu'une version de secours par composant.
+	 *
+	 * Sans cela, `.anode-versions/` accumule une copie à chaque mise à jour :
+	 * quelques kilo-octets, mais indéfiniment, et sur tous les sites. Une seule
+	 * suffit — revenir deux versions en arrière se fait depuis le dépôt.
+	 */
+	private static function elaguer( string $archives, string $nom, ?string $garder ): void {
+		global $wp_filesystem;
+
+		foreach ( (array) $wp_filesystem->dirlist( $archives ) as $entree ) {
+			$chemin = trailingslashit( $archives ) . $entree['name'];
+
+			if ( ! str_starts_with( (string) $entree['name'], $nom . '-' ) || $chemin === $garder ) {
+				continue;
+			}
+
+			$wp_filesystem->delete( $chemin, true );
+		}
 	}
 
 	/** Version actuellement installée, lue dans l'en-tête. */
