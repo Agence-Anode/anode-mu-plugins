@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Anode — mises à jour
  * Description: Tient à jour les mu-plugins maison depuis leurs dépôts GitHub. Vérifie chaque jour, applique les correctifs et les versions mineures, retient les majeures.
- * Version:     1.0.1
+ * Version:     1.0.2
  * Author:      Anode
  * Requires PHP: 8.1
  *
@@ -56,7 +56,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 
 final class Updater {
 
-	public const VERSION = '1.0.1';
+	public const VERSION = '1.0.2';
 
 	/** Où l'on retient le résultat de la dernière vérification. */
 	public const OPTION_ETAT = 'anode_updater_etat';

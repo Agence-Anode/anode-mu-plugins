@@ -28,7 +28,12 @@ final class Planificateur {
 		add_action( Updater::CRON, [ self::class, 'executer' ] );
 
 		// Déclenchement à la demande, depuis un autre mu-plugin ou le pont REST.
-		add_action( 'anode/updater/verifier', [ self::class, 'executer' ] );
+		//
+		// Sans le cache : qui demande une vérification maintenant veut l'état
+		// réel, pas celui de six heures plus tôt. Le cron, lui, garde le cache —
+		// trente sites qui interrogent l'API chaque jour, c'est ce qui finit par
+		// se faire limiter.
+		add_action( 'anode/updater/verifier', [ self::class, 'verifier_maintenant' ] );
 		add_action( 'anode/updater/appliquer', [ self::class, 'appliquer_en_attente' ] );
 
 		add_action( 'admin_notices', [ self::class, 'annoncer' ] );
@@ -41,6 +46,20 @@ final class Planificateur {
 		}
 
 		wp_schedule_event( strtotime( 'tomorrow 4:00' ), 'daily', Updater::CRON );
+	}
+
+	/**
+	 * Vérifie sans tenir compte du cache des releases.
+	 *
+	 * Une version publiée à l'instant reste invisible jusqu'à six heures sans
+	 * cela — constaté en publiant puis en vérifiant aussitôt.
+	 */
+	public static function verifier_maintenant(): array {
+		foreach ( array_unique( array_column( Updater::composants(), 'repo' ) ) as $repo ) {
+			Source::oublier( (string) $repo );
+		}
+
+		return self::executer();
 	}
 
 	/**
