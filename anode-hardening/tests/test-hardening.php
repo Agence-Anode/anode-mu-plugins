@@ -42,6 +42,8 @@ function reinitialiser( array $depart = [] ): void {
 		[
 			'options'    => [],
 			'transients' => [],
+			'accroches'  => [],
+			'retraits'   => [],
 			'connecte'   => false,
 			'base'       => 'http://exemple.test',
 			'requete'    => '/',
@@ -132,9 +134,26 @@ function wp_parse_url( string $url, int $composant = -1 ) {
 	return PHP_URL_PATH === $composant ? ( $parts['path'] ?? '' ) : $parts;
 }
 
-function add_action(): void {}
+/**
+ * Les accroches sont enregistrées, pas exécutées : les tests appellent la
+ * fermeture qui les intéresse en la reprenant dans `$etat['accroches']`.
+ */
+function add_action( string $accroche, $rappel = null, int $priorite = 10 ): void {
+	global $etat;
+
+	$etat['accroches'][ $accroche ][] = $rappel;
+}
 function add_filter(): void {}
-function remove_action(): void {}
+
+/**
+ * `remove_action` est observée : c'est elle qui désarme la redirection de
+ * WordPress vers l'URL de connexion, et rien d'autre ne le prouverait.
+ */
+function remove_action( string $accroche, $rappel, int $priorite = 10 ): void {
+	global $etat;
+
+	$etat['retraits'][] = [ $accroche, $rappel, $priorite ];
+}
 function apply_filters( string $nom, $valeur ) {
 	return $valeur;
 }
@@ -164,6 +183,28 @@ function __( string $texte ): string {
 }
 
 require_once __DIR__ . '/../anode-hardening.php';
+
+/*
+ * Les accroches ne sont enregistrées qu'une fois, au chargement du fichier —
+ * alors que `reinitialiser()` vide l'état avant chaque test. On les fige donc
+ * ici, hors de l'état remis à zéro, pour pouvoir rejouer une fermeture précise.
+ *
+ * @var array<string, list<callable>>
+ */
+$accroches_enregistrees = $etat['accroches'];
+
+/** Rejoue la fermeture enregistrée sur une accroche donnée. */
+function rejouer( string $accroche, int $rang = 0 ): void {
+	global $accroches_enregistrees;
+
+	$rappel = $accroches_enregistrees[ $accroche ][ $rang ] ?? null;
+
+	if ( ! is_callable( $rappel ) ) {
+		throw new \RuntimeException( "aucune fermeture enregistrée sur « {$accroche} » au rang {$rang}" );
+	}
+
+	$rappel();
+}
 
 /* --- Harnais --------------------------------------------------------- */
 
@@ -244,6 +285,26 @@ test( 'le masquage est actif par défaut, y compris en développement', function
 	 * segment étant désormais fixe, il n'y a plus de raison de l'éteindre.
 	 */
 	assertTrue( login_masking_enabled() );
+} );
+
+test( 'la redirection de WordPress vers /login est désarmée', function (): void {
+	/*
+	 * `wp_redirect_admin_locations()` répond à `/login` par une redirection vers
+	 * `wp_login_url()` — que nos filtres réécrivent en URL masquée. WordPress
+	 * mettait donc le segment masqué en clair dans l'en-tête `Location`, en
+	 * réponse à une requête anonyme sur une adresse que tout le monde essaie.
+	 *
+	 * Le retrait vise la priorité 1000 : `remove_action` ne retire rien si la
+	 * priorité ne correspond pas, et l'échec serait silencieux.
+	 */
+	global $etat;
+
+	rejouer( 'init', 1 );
+
+	assertSame(
+		[ [ 'template_redirect', 'wp_redirect_admin_locations', 1000 ] ],
+		$etat['retraits']
+	);
 } );
 
 /* --- Chemin demandé -------------------------------------------------- */

@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Anode — durcissement
  * Description: Sécurité de base sans extension tierce : URL de connexion masquée, limitation des tentatives, en-têtes de sécurité, XML-RPC coupé, énumération des comptes bloquée.
- * Version:     1.1.0
+ * Version:     1.3.0
  * Author:      Anode
  *
  * Remplace SecuPress Pro et WPS Hide Login.
@@ -24,11 +24,14 @@ if ( ! defined( 'ABSPATH' ) ) {
 }
 
 /*
- * Une seule source pour la version : l'en-tête du fichier, que l'updater lit.
- * Ce doublon avait déjà dérivé — en-tête 1.0.1, constante 1.0.0 — et c'est la
- * constante que le code aurait rapportée.
+ * Pas de constante de version ici : l'en-tête du fichier est la seule source,
+ * et c'est elle que l'updater lit.
+ *
+ * Le doublon a dérivé deux fois — en-tête 1.0.1 contre constante 1.0.0, puis
+ * 1.2.0 contre 1.1.0. Le commentaire qui l'accompagnait promettait une source
+ * unique tout en en laissant deux. Aucun code ne lisait la constante : la
+ * supprimer coûte zéro et referme la dérive pour de bon.
  */
-const VERSION = '1.1.0';
 
 /** Option contenant le segment d'URL de connexion. */
 const OPTION_LOGIN_SLUG = 'anode_login_slug';
@@ -161,6 +164,18 @@ add_action(
 			return;
 		}
 
+		/*
+		 * WP-CLI et le cron n'ont pas d'URL demandée : `requested_path()` rend
+		 * une chaîne vide, aucune branche ne correspond, et le masquage les
+		 * laisse déjà passer. La garde est explicite pour que personne n'ajoute
+		 * plus tard une branche qui les attraperait — l'outillage de l'hébergeur
+		 * s'appuie sur ces deux chemins pour cloner un site ou le remettre en
+		 * service.
+		 */
+		if ( ( defined( 'WP_CLI' ) && WP_CLI ) || wp_doing_cron() ) {
+			return;
+		}
+
 		$path = requested_path();
 		$slug = login_slug();
 
@@ -194,6 +209,36 @@ add_action(
 			if ( ! is_user_logged_in() ) {
 				not_found();
 			}
+		}
+	}
+);
+
+/*
+ * WordPress redirige lui-même `/login`, `/admin` et `/dashboard`.
+ *
+ * `wp_redirect_admin_locations()` s'exécute sur `template_redirect` à la
+ * priorité 1000, dès qu'une 404 tombe sur une installation à permaliens. Elle
+ * compare l'URI demandée à deux listes :
+ *
+ *   /wp-admin, /dashboard, /admin   →  wp_redirect( admin_url() )
+ *   /wp-login.php, /login.php, /login  →  wp_redirect( wp_login_url() )
+ *
+ * La seconde est le problème, et il est net : nos filtres réécrivent
+ * `login_url` vers le segment masqué. WordPress met donc **l'URL masquée en
+ * clair dans l'en-tête `Location`**, en réponse à une requête anonyme sur
+ * `/login`. Tout le masquage tombe pour qui essaie une adresse évidente.
+ *
+ * La première ne fuite rien, mais elle contourne la garde `wp-admin` : elle
+ * répond 302 là où l'on veut une 404 indiscernable.
+ *
+ * Mesuré sur blueprint.agence-anode.fr, où ce retrait est en place : `/login` et
+ * `/dashboard` renvoient bien 404. Sans lui, ils renvoient une redirection.
+ */
+add_action(
+	'init',
+	static function (): void {
+		if ( login_masking_enabled() ) {
+			remove_action( 'template_redirect', 'wp_redirect_admin_locations', 1000 );
 		}
 	}
 );
@@ -391,15 +436,40 @@ add_action(
 );
 
 /**
- * Message d'erreur de connexion générique.
+ * Message d'erreur de connexion générique — sauf pour le verrouillage.
  *
  * Le message natif distingue « identifiant inconnu » de « mot de passe
- * incorrect » : c'est un oracle qui permet d'énumérer les comptes valides.
+ * incorrect » : c'est un oracle qui permet d'énumérer les comptes valides. On
+ * le remplace donc par un message unique.
+ *
+ * Mais il faut une exception, et elle demande de savoir **quel** code d'erreur
+ * a été levé. `login_errors` ne reçoit que le texte déjà rendu — jamais le
+ * code : la condition qui cherchait `anode_too_many_attempts` dans le message
+ * était donc toujours fausse, et le message de verrouillage systématiquement
+ * écrasé. Le verrou fonctionnait, mais rien ne le disait : cinq échecs puis
+ * une sixième tentative refusée pour la même raison apparente.
+ *
+ * `wp_login_errors` reçoit l'objet `WP_Error`, où le code existe encore. On
+ * relève donc l'information là, et `login_errors` s'y réfère.
  */
+add_filter(
+	'wp_login_errors',
+	static function ( $errors ) {
+		if ( $errors instanceof \WP_Error && in_array( 'anode_too_many_attempts', $errors->get_error_codes(), true ) ) {
+			$GLOBALS['anode_login_verrouille'] = true;
+		}
+
+		return $errors;
+	},
+	PHP_INT_MAX
+);
+
 add_filter(
 	'login_errors',
 	static function ( $error ) {
-		if ( is_string( $error ) && str_contains( $error, 'anode_too_many_attempts' ) ) {
+		// Le verrouillage se dit : sans message, la personne réessaie en boucle
+		// sans comprendre, et le compteur se prolonge à chaque tentative.
+		if ( ! empty( $GLOBALS['anode_login_verrouille'] ) ) {
 			return $error;
 		}
 
@@ -499,6 +569,52 @@ add_filter(
 	}
 );
 
+/**
+ * L'API oEmbed ne nomme pas l'auteur d'une page.
+ *
+ * `/wp-json/oembed/1.0/embed?url=…` sert `author_name` et `author_url` sans
+ * aucune authentification : elle rend exactement l'identifiant de connexion que
+ * les trois gardes ci-dessus retirent. Mesuré sur une installation où
+ * `/?author=1` et `/wp-json/wp/v2/users` étaient déjà fermés — le nom du compte
+ * administrateur sortait quand même.
+ *
+ * @param array<string, mixed> $donnees Réponse oEmbed.
+ * @return array<string, mixed>
+ */
+add_filter(
+	'oembed_response_data',
+	static function ( $donnees ) {
+		if ( is_array( $donnees ) ) {
+			unset( $donnees['author_name'], $donnees['author_url'] );
+		}
+
+		return $donnees;
+	}
+);
+
+/**
+ * Hors production, `robots.txt` interdit toute exploration.
+ *
+ * Le fichier par défaut n'interdit que `/wp-admin/` : il invite donc à explorer
+ * une préproduction que `anode-seo` déclare pourtant en `noindex`. Les deux se
+ * contredisent, et un robot qui lit d'abord `robots.txt` n'ira jamais lire la
+ * balise qui le lui aurait dit.
+ *
+ * @param string $sortie Contenu du fichier.
+ * @return string
+ */
+add_filter(
+	'robots_txt',
+	static function ( $sortie ) {
+		if ( 'production' === wp_get_environment_type() ) {
+			return $sortie;
+		}
+
+		return "User-agent: *\nDisallow: /\n";
+	},
+	20
+);
+
 add_filter(
 	'rest_endpoints',
 	static function ( array $endpoints ): array {
@@ -540,7 +656,21 @@ add_filter(
 			'Permissions-Policy'     => 'geolocation=(), microphone=(), camera=(), interest-cohort=()',
 		];
 
-		if ( is_ssl() ) {
+		/*
+		 * HSTS ne se pose qu'en production.
+		 *
+		 * L'en-tête engage le navigateur pour un an : il refusera ensuite toute
+		 * connexion en clair vers ce domaine **et ses sous-domaines**. Posé
+		 * depuis une préproduction en `staging.exemple.fr`, il peut donc rendre
+		 * inaccessible un site de développement voisin — et le seul remède est
+		 * d'aller purger la liste HSTS du navigateur à la main, poste par poste.
+		 *
+		 * `wp_get_environment_type()` rend « production » par défaut : une
+		 * installation qui ne déclare rien garde donc l'en-tête. C'est le bon
+		 * sens du doute — une production non déclarée est plus fréquente qu'une
+		 * préproduction non déclarée.
+		 */
+		if ( is_ssl() && 'production' === wp_get_environment_type() ) {
 			$defaults['Strict-Transport-Security'] = 'max-age=31536000; includeSubDomains';
 		}
 
@@ -566,6 +696,192 @@ add_action(
 		remove_action( 'wp_head', 'rsd_link' );
 		remove_action( 'wp_head', 'wlwmanifest_link' );
 	}
+);
+
+/* ------------------------------------------------------------------ */
+/* Téléversements                                                      */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Types MIME autorisés en plus de ceux de WordPress.
+ *
+ * @param array<string,string> $types Types autorisés.
+ * @return array<string,string>
+ */
+add_filter(
+	'upload_mimes',
+	static function ( array $types ): array {
+		$types['webp']  = 'image/webp';
+		$types['avif']  = 'image/avif';
+		$types['woff']  = 'font/woff';
+		$types['woff2'] = 'font/woff2';
+
+		/*
+		 * Le SVG n'est ouvert qu'aux comptes qui peuvent déjà exécuter du code.
+		 *
+		 * Un SVG est un document XML : il porte `<script>`, `<foreignObject>` et
+		 * des gestionnaires `on*`. Le servir depuis le domaine du site, c'est
+		 * offrir un XSS stocké à qui peut téléverser — le rôle « auteur » suffit.
+		 * Le réserver à `unfiltered_html` aligne le risque sur un droit que ce
+		 * rôle possède déjà.
+		 *
+		 * Conséquence à connaître : `DISALLOW_UNFILTERED_HTML`, posée par
+		 * défaut dans `config/wp-config-extrait.php`, retire ce droit à **tout
+		 * le monde**, administrateurs compris. Le SVG est alors refusé partout,
+		 * et la cause n'est pas dans ce fichier. C'est le réglage voulu : un
+		 * site dont le client dépose lui-même des SVG retire la constante, en
+		 * connaissant le risque.
+		 */
+		if ( current_user_can( 'unfiltered_html' ) ) {
+			$types['svg'] = 'image/svg+xml';
+		}
+
+		return $types;
+	}
+);
+
+/**
+ * Refuse un téléversement dont le type ne figure pas dans la liste.
+ *
+ * @param array<string,mixed> $file Descripteur du fichier téléversé.
+ * @return array<string,mixed>
+ */
+add_filter(
+	'wp_handle_upload_prefilter',
+	static function ( array $file ): array {
+		$allowed = [
+			'image/jpeg',
+			'image/png',
+			'image/webp',
+			'image/avif',
+			'image/gif',
+			'application/pdf',
+			'application/zip',
+			'application/x-zip-compressed',
+			'font/woff',
+			'application/font-woff',
+			'application/x-font-woff',
+			'font/woff2',
+			'application/font-woff2',
+			'video/mp4',
+			'video/webm',
+		];
+
+		if ( current_user_can( 'unfiltered_html' ) ) {
+			$allowed[] = 'image/svg+xml';
+		}
+
+		if ( ! in_array( $file['type'] ?? '', $allowed, true ) ) {
+			$file['error'] = sprintf(
+				/* translators: %s : type MIME refusé. */
+				__( 'Type de fichier refusé (%s). Formats acceptés : JPG, PNG, WEBP, AVIF, GIF, PDF, ZIP, WOFF, WOFF2, MP4, WEBM.', 'anode' ),
+				(string) ( $file['type'] ?? '' )
+			);
+		}
+
+		return $file;
+	}
+);
+
+/**
+ * Retire d'un SVG ce qui s'y exécute.
+ *
+ * Le contrôle de type ne dit rien du contenu : un fichier au bon MIME peut
+ * porter un script. On l'assainit donc avant qu'il n'atteigne la médiathèque —
+ * autrement, autoriser le SVG revient à autoriser le JavaScript.
+ *
+ * La priorité 20 place ce filtre **après** celui qui refuse les types non
+ * autorisés : inutile d'assainir un fichier qui ne sera pas accepté.
+ *
+ * @param array<string,mixed> $file Descripteur du fichier téléversé.
+ * @return array<string,mixed>
+ */
+add_filter(
+	'wp_handle_upload_prefilter',
+	static function ( array $file ): array {
+		if ( 'image/svg+xml' !== ( $file['type'] ?? '' ) || ! empty( $file['error'] ) ) {
+			return $file;
+		}
+
+		$contents = file_get_contents( $file['tmp_name'] ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents
+
+		if ( false === $contents ) {
+			return $file;
+		}
+
+		$clean = preg_replace(
+			[
+				'#<script\b[^>]*>.*?</script>#is',
+				'#<script\b[^>]*/>#i',
+				'#<foreignObject\b[^>]*>.*?</foreignObject>#is',
+				'#<!ENTITY[^>]*>#i',
+				'#\son\w+\s*=\s*"[^"]*"#i',
+				"#\son\w+\s*=\s*'[^']*'#i",
+				'#(href|xlink:href)\s*=\s*(["\'])\s*(?:javascript|data):[^"\']*\2#i',
+			],
+			'',
+			$contents
+		);
+
+		/*
+		 * `preg_replace` rend `null` sur erreur PCRE — limite de retour arrière,
+		 * UTF-8 invalide. Écrire ce `null` viderait le fichier ; le laisser tel
+		 * quel laisserait passer un SVG non assaini. On refuse donc le fichier :
+		 * c'est le seul des trois résultats qui ne surprend personne.
+		 */
+		if ( null === $clean ) {
+			$file['error'] = __( 'Ce fichier SVG n’a pas pu être analysé. Exportez-le à nouveau depuis votre outil de dessin.', 'anode' );
+
+			return $file;
+		}
+
+		if ( $clean !== $contents ) {
+			file_put_contents( $file['tmp_name'], $clean ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_put_contents_file_put_contents
+		}
+
+		return $file;
+	},
+	20
+);
+
+/* ------------------------------------------------------------------ */
+/* Maintenance                                                         */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Les mises à jour ne se posent pas toutes seules.
+ *
+ * Bricks et le thème enfant décident du rendu : une montée de version pendant
+ * la nuit peut déplacer une mise en page sans que personne ne l'ait demandé.
+ * Elles se posent après vérification. Les mu-plugins, eux, ont leur propre
+ * canal — celui de l'updater, qui distingue correctif et version majeure.
+ */
+add_filter( 'auto_update_core', '__return_false' );
+add_filter( 'auto_update_plugin', '__return_false' );
+add_filter( 'auto_update_theme', '__return_false' );
+add_filter( 'auto_core_update_send_email', '__return_false' );
+add_filter( 'send_auto_update_email', '__return_false' );
+
+/**
+ * Prolonge le cookie de connexion pour qui coche « se souvenir de moi ».
+ *
+ * Deux semaines par défaut, et le builder redemande donc les identifiants en
+ * plein travail d'intégration. Un an ne dégrade rien ici : l'URL de connexion
+ * est masquée, les tentatives sont limitées, et le cookie reste lié à
+ * l'appareil.
+ *
+ * @param int  $duree    Durée en secondes.
+ * @param int  $user_id  Compte concerné.
+ * @param bool $memoriser « Se souvenir de moi » coché.
+ * @return int
+ */
+add_filter(
+	'auth_cookie_expiration',
+	static function ( $duree, $user_id, $memoriser ) {
+		return $memoriser ? YEAR_IN_SECONDS : $duree;
+	},
+	99,
+	3
 );
 
 /* ------------------------------------------------------------------ */
