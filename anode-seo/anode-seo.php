@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Anode — SEO
  * Description: Titres, méta descriptions, URL canoniques, robots et cartes sociales, pilotables par l'API REST. Remplace Yoast pour un site vitrine.
- * Version:     1.0.0
+ * Version:     1.2.0
  * Author:      Anode
  *
  * Pourquoi une extension maison plutôt que Yoast : un site construit ici n'a
@@ -28,7 +28,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 
 final class Seo {
 
-	public const VERSION = '1.0.0';
+	public const VERSION = '1.2.0';
 
 	/** Préfixe commun aux métadonnées, protégées par le tiret bas initial. */
 	public const PREFIX = '_anode_seo_';
@@ -74,15 +74,75 @@ final class Seo {
 		// main sur l'affichage : le contenu déjà saisi ne doit pas disparaître.
 		add_action( 'init', [ $seo, 'register_meta' ], 6 );
 
+		/*
+		 * L'affichage ne se décide pas ici. Ce fichier est un mu-plugin : il est
+		 * chargé avant les extensions ordinaires, donc avant qu'une seule
+		 * constante de Yoast ou de Rank Math n'existe. third_party_active()
+		 * répondait toujours « non », et l'effacement promis n'avait jamais
+		 * lieu — les deux jeux de balises sortaient ensemble.
+		 */
+		add_action( 'plugins_loaded', [ $seo, 'register_output' ], 20 );
+	}
+
+	/**
+	 * Prend la main sur l'en-tête, sauf si une extension SEO tierce est active.
+	 */
+	public function register_output(): void {
 		if ( self::third_party_active() ) {
 			return;
 		}
 
-		add_filter( 'pre_get_document_title', [ $seo, 'filter_document_title' ], 20 );
-		add_action( 'wp_head', [ $seo, 'print_head' ], 1 );
+		add_filter( 'pre_get_document_title', [ $this, 'filter_document_title' ], 20 );
+		add_action( 'wp_head', [ $this, 'print_head' ], 1 );
 
 		// WordPress pose sa propre canonique : la nôtre la remplace.
 		remove_action( 'wp_head', 'rel_canonical' );
+
+		/*
+		 * La directive « robots » passe par le **filtre du noyau**, pas par une
+		 * balise concurrente.
+		 *
+		 * Émettre la nôtre en retirant celle du noyau réglait bien le doublon —
+		 * deux balises par page, parfois contradictoires — mais emportait tout ce
+		 * que le noyau décide au passage, et que personne ne réimplémente :
+		 *
+		 * - `?replytocom=` et l'aperçu d'un commentaire non modéré perdaient leur
+		 *   `noindex`, et le second **expose du contenu non modéré** ;
+		 * - les résultats de recherche passaient de `noindex, follow` à
+		 *   `noindex, nofollow`, un durcissement que personne n'avait décidé ;
+		 * - le filtre `wp_robots` devenait inerte côté public : un thème enfant ou
+		 *   un mu-plugin qui s'y accroche était ignoré sans trace.
+		 *
+		 * En passant par le filtre, une seule balise sort — celle du noyau — nos
+		 * directives s'y ajoutent, et le point d'extension reste vivant.
+		 */
+		add_filter( 'wp_robots', [ $this, 'filter_robots' ] );
+	}
+
+	/**
+	 * Ajoute nos directives à celles du noyau.
+	 *
+	 * Un `noindex` de notre fait — page exclue, site hors production — **prime
+	 * sur tout le reste** : on remplace alors les directives au lieu de les
+	 * compléter, sans quoi un `index` déjà posé cohabiterait avec notre `noindex`
+	 * dans la même balise.
+	 *
+	 * @param array<string, mixed> $robots Directives accumulées.
+	 * @return array<string, mixed>
+	 */
+	public function filter_robots( array $robots ): array {
+		$context = $this->context();
+
+		if ( ! empty( $context['noindex'] ) || empty( $context['indexable'] ) ) {
+			return [
+				'noindex'  => true,
+				'nofollow' => true,
+			];
+		}
+
+		$robots['max-image-preview'] = 'large';
+
+		return $robots;
 	}
 
 	/* ------------------------------------------------------------------ */
@@ -124,7 +184,12 @@ final class Seo {
 	public static function sanitize( string $field, $value ) {
 		switch ( $field ) {
 			case 'description':
-				return sanitize_textarea_field( (string) $value );
+				// sanitize_textarea_field() garde les retours à la ligne : une
+				// description collée depuis un traitement de texte arrivait
+				// telle quelle dans l'attribut « content », sur plusieurs
+				// lignes. Les moteurs la recomposent alors comme ils veulent,
+				// et l'en-tête devient illisible à la relecture.
+				return self::single_line( sanitize_textarea_field( (string) $value ) );
 
 			case 'canonical':
 				return esc_url_raw( (string) $value );
@@ -221,16 +286,14 @@ final class Seo {
 			$tags[] = [ 'tag' => 'meta', 'name' => 'description', 'content' => $description ];
 		}
 
-		// Un site hors production ou une page exclue ne doivent jamais être
-		// indexés : la directive prime sur tout le reste.
-		if ( ! empty( $context['noindex'] ) || empty( $context['indexable'] ) ) {
-			$tags[] = [ 'tag' => 'meta', 'name' => 'robots', 'content' => 'noindex, nofollow' ];
-		} else {
-			$tags[] = [ 'tag' => 'meta', 'name' => 'robots', 'content' => 'index, follow, max-image-preview:large' ];
-
-			if ( '' !== $canonical ) {
-				$tags[] = [ 'tag' => 'link', 'rel' => 'canonical', 'href' => $canonical ];
-			}
+		/*
+		 * La directive « robots » ne sort plus d'ici : elle passe par le filtre
+		 * `wp_robots` du noyau (voir `filter_robots`), qui n'émet qu'une balise.
+		 * Reste la canonique, qu'une page non indexable n'a pas à déclarer — elle
+		 * n'a pas d'URL de référence à faire valoir.
+		 */
+		if ( empty( $context['noindex'] ) && ! empty( $context['indexable'] ) && '' !== $canonical ) {
+			$tags[] = [ 'tag' => 'link', 'rel' => 'canonical', 'href' => $canonical ];
 		}
 
 		$tags[] = [ 'tag' => 'meta', 'property' => 'og:type', 'content' => (string) ( $context['type'] ?? 'website' ) ];
@@ -248,6 +311,19 @@ final class Seo {
 
 		if ( '' !== $image ) {
 			$tags[] = [ 'tag' => 'meta', 'property' => 'og:image', 'content' => $image ];
+
+			// Plusieurs messageries — WhatsApp, Signal, Slack — réservent la
+			// place de l'aperçu avant de l'avoir téléchargé : sans dimensions
+			// annoncées, elles rendent une carte tronquée, ou pas de carte du
+			// tout. On ne les annonce que si on les connaît : des dimensions
+			// fausses valent moins que pas de dimensions.
+			$width  = (int) ( $context['image_width'] ?? 0 );
+			$height = (int) ( $context['image_height'] ?? 0 );
+
+			if ( $width > 0 && $height > 0 ) {
+				$tags[] = [ 'tag' => 'meta', 'property' => 'og:image:width', 'content' => (string) $width ];
+				$tags[] = [ 'tag' => 'meta', 'property' => 'og:image:height', 'content' => (string) $height ];
+			}
 		}
 
 		// Twitter lit les balises Open Graph : seule la nature de la carte
@@ -276,7 +352,7 @@ final class Seo {
 	 */
 	public static function description( array $context ): string {
 		foreach ( [ 'seo_description', 'excerpt', 'default_description' ] as $key ) {
-			$value = trim( (string) ( $context[ $key ] ?? '' ) );
+			$value = self::single_line( (string) ( $context[ $key ] ?? '' ) );
 
 			if ( '' !== $value ) {
 				return $value;
@@ -284,6 +360,21 @@ final class Seo {
 		}
 
 		return '';
+	}
+
+	/**
+	 * Ramène un texte sur une seule ligne.
+	 *
+	 * Un attribut « content » n'a pas de ligne : un retour à la ligne y est un
+	 * blanc de plus, que chaque moteur interprète à sa façon. Le cas arrive par
+	 * deux chemins — une description collée depuis un traitement de texte, et
+	 * l'extrait d'une page, qui garde les sauts de ligne du contenu.
+	 *
+	 * Les espaces insécables sont conservées : `\s` ne les couvre pas sans
+	 * l'option UCP, et la typographie française en dépend (« mot : »).
+	 */
+	private static function single_line( string $value ): string {
+		return trim( (string) preg_replace( '/\s+/', ' ', $value ) );
 	}
 
 	/**
@@ -330,17 +421,60 @@ final class Seo {
 	 * @return array<string, mixed>
 	 */
 	private function context(): array {
-		$post_id  = is_singular() ? (int) get_queried_object_id() : 0;
+		$post_id = is_singular() ? (int) get_queried_object_id() : 0;
+
+		/*
+		 * La page désignée comme « page des articles » n'est pas un contenu
+		 * singulier : WordPress la rend par is_home(). Sans ce cas, le SEO
+		 * rédigé pour elle — titre, description, image, noindex — était en base
+		 * et n'était lu par personne : l'écriture réussissait, l'affichage
+		 * retombait sur les valeurs du site, et rien ne le signalait.
+		 */
+		$posts_page = ( ! $post_id && is_home() && ! is_front_page() ) ? (int) get_option( 'page_for_posts' ) : 0;
+		$post_id    = $post_id ?: $posts_page;
+
 		$image_id = $post_id ? (int) get_post_meta( $post_id, self::PREFIX . 'image', true ) : 0;
 
 		if ( ! $image_id && $post_id && has_post_thumbnail( $post_id ) ) {
 			$image_id = (int) get_post_thumbnail_id( $post_id );
 		}
 
-		$image = $image_id ? (string) wp_get_attachment_image_url( $image_id, 'large' ) : '';
+		$image  = '';
+		$width  = 0;
+		$height = 0;
+
+		/*
+		 * wp_get_attachment_image_src() plutôt que wp_get_attachment_image_url()
+		 * : même URL, mais les dimensions viennent avec, et og:image en a besoin
+		 * (voir tags()). Les deux valeurs décrivent alors la même déclinaison —
+		 * annoncer la taille du fichier d'origine pour une image en « large »
+		 * serait pire que de ne rien annoncer.
+		 */
+		$source = $image_id ? wp_get_attachment_image_src( $image_id, 'large' ) : false;
+
+		if ( is_array( $source ) && '' !== (string) ( $source[0] ?? '' ) ) {
+			$image  = (string) $source[0];
+			$width  = (int) ( $source[1] ?? 0 );
+			$height = (int) ( $source[2] ?? 0 );
+		}
 
 		if ( '' === $image ) {
 			$image = (string) get_option( 'anode_seo_social_image', '' );
+
+			/*
+			 * L'image de partage du site est enregistrée sous forme d'URL : on
+			 * remonte à la pièce jointe pour en connaître les dimensions. Si
+			 * l'URL est celle d'une déclinaison redimensionnée, la recherche
+			 * échoue — et on n'annonce alors aucune dimension, plutôt que
+			 * celles d'un autre fichier.
+			 */
+			$default = '' === $image ? 0 : (int) attachment_url_to_postid( $image );
+			$source  = $default ? wp_get_attachment_image_src( $default, 'full' ) : false;
+
+			if ( is_array( $source ) ) {
+				$width  = (int) ( $source[1] ?? 0 );
+				$height = (int) ( $source[2] ?? 0 );
+			}
 		}
 
 		return [
@@ -357,14 +491,41 @@ final class Seo {
 			// Hors contenu singulier, WordPress lui-même ne pose pas de
 			// canonique : une archive paginée ou filtrée n'a pas d'URL de
 			// référence évidente, et en inventer une nuit plus qu'elle n'aide.
-			'url'                 => $post_id ? (string) get_permalink( $post_id ) : ( is_front_page() ? home_url( '/' ) : '' ),
-			'noindex'             => $post_id && get_post_meta( $post_id, self::PREFIX . 'noindex', true ),
+			// La page des articles paginée relève du même cas : une canonique
+			// vers /blog/ dirait à Google que /blog/page/2/ n'en est qu'un
+			// double, et son contenu disparaîtrait de l'index.
+			/*
+			 * Le `! is_paged()` ne vaut que pour la **page des articles**.
+			 *
+			 * Posé sur toute l'expression, il faisait perdre sa canonique à
+			 * **chaque contenu singulier** dès la seconde page — et `rel_canonical`
+			 * du noyau étant retiré, plus personne ne la posait. Le site gagnait
+			 * ainsi une famille d'URL indexables sans signal de consolidation.
+			 *
+			 * Sur la page des articles, en revanche, une canonique vers `/blog/`
+			 * dirait à Google que `/blog/page/2/` n'en est qu'un double, et son
+			 * contenu disparaîtrait de l'index. C'est le seul cas visé.
+			 */
+			'url'                 => $post_id && ! ( $posts_page && is_paged() )
+				? (string) get_permalink( $post_id )
+				: ( is_front_page() ? home_url( '/' ) : '' ),
+			// Le noyau posait le « noindex » des pages de résultats de
+			// recherche ; sa balise étant désormais retirée de wp_head (voir
+			// register_output), c'est à nous de le poser — sans quoi elles
+			// deviendraient indexables du jour où l'on a corrigé le doublon.
+			// La recherche n'est plus notre affaire : le noyau lui pose
+			// « noindex, follow » par `wp_robots_no_robots`, et le filtre nous
+			// laisse désormais cette règle intacte. La forcer ici y ajouterait un
+			// `nofollow` que personne n'a demandé.
+			'noindex'             => (bool) ( $post_id && get_post_meta( $post_id, self::PREFIX . 'noindex', true ) ),
 			// Un site de préproduction ne doit jamais remonter dans Google.
 			'indexable'           => '1' === (string) get_option( 'anode_seo_indexable', '1' )
 				&& (bool) get_option( 'blog_public', 1 )
-				&& 'production' === wp_get_environment_type(),
+				&& self::production_declared(),
 			'locale'              => (string) get_option( 'anode_seo_locale', self::OPTIONS['anode_seo_locale'] ),
 			'image'               => $image,
+			'image_width'         => $width,
+			'image_height'        => $height,
 			'type'                => is_singular( 'post' ) ? 'article' : 'website',
 			'published'           => $post_id ? get_post_time( 'c', true, $post_id ) : '',
 			'modified'            => $post_id ? get_post_modified_time( 'c', true, $post_id ) : '',
@@ -410,6 +571,92 @@ final class Seo {
 		}
 
 		return '';
+	}
+
+	/**
+	 * Ce site est-il une production ?
+	 *
+	 * Deux oublis symétriques menacent, et une seule règle doit tenir les deux :
+	 *
+	 * - une **préproduction** qui remonte dans Google parce que personne n'a
+	 *   pensé à la déclarer ;
+	 * - une **production en ligne** qui se dé-indexe parce que personne n'a pensé
+	 *   à la déclarer non plus.
+	 *
+	 * Exiger la déclaration ne règle que le premier, et crée le second — en pire :
+	 * il part tout seul avec une mise à jour mineure, sur des sites qui
+	 * fonctionnaient. Aucun outil du dépôt n'écrit cette constante aujourd'hui.
+	 *
+	 * La règle retenue reconnaît donc une **non-production**, au lieu d'exiger une
+	 * production :
+	 *
+	 * 1. une déclaration explicite fait foi, dans les deux sens — c'est le seul
+	 *    moyen sûr, et l'ordre de résolution est celui du noyau, la constante
+	 *    avant la variable d'environnement ;
+	 * 2. sans déclaration, un domaine reconnaissable de développement ou de
+	 *    recette n'est pas une production ;
+	 * 3. sinon, production — comme WordPress lui-même en décide.
+	 *
+	 * L'erreur devient alors « un site de recette sur un domaine qu'on n'a pas su
+	 * reconnaître », qui se corrige en déclarant la constante. Pas « tous les
+	 * sites livrés disparaissent de Google ».
+	 */
+	public static function production_declared(): bool {
+		$constant = defined( 'WP_ENVIRONMENT_TYPE' ) && is_scalar( WP_ENVIRONMENT_TYPE )
+			? (string) WP_ENVIRONMENT_TYPE
+			: '';
+
+		$declared = '' !== $constant
+			? $constant
+			: (string) ( function_exists( 'getenv' ) ? getenv( 'WP_ENVIRONMENT_TYPE' ) : '' );
+
+		$declared = strtolower( trim( $declared ) );
+
+		if ( '' !== $declared ) {
+			return 'production' === $declared;
+		}
+
+		return ! self::host_looks_transient();
+	}
+
+	/**
+	 * Le domaine trahit-il un environnement qui n'est pas destiné au public ?
+	 *
+	 * Volontairement conservateur : chaque motif désigne un domaine qu'on ne
+	 * publie pas. Un faux positif dé-indexe un site en ligne — c'est le tort
+	 * qu'on cherche à éviter —, un faux négatif laisse une recette indexable, ce
+	 * que `anode_seo_indexable` et `blog_public` rattrapent tous deux.
+	 *
+	 * `WP_ENVIRONMENT_TYPE` prime sur cette liste : un site servi depuis un
+	 * domaine d'aperçu et réellement destiné au public se déclare.
+	 */
+	private static function host_looks_transient(): bool {
+		$host = strtolower( (string) wp_parse_url( home_url(), PHP_URL_HOST ) );
+
+		if ( '' === $host ) {
+			return false;
+		}
+
+		// Machines de développement : Local, DDEV, MAMP, et la boucle locale.
+		foreach ( [ '.local', '.test', '.localhost', '.invalid', '.example', '.ddev.site' ] as $suffixe ) {
+			if ( str_ends_with( $host, $suffixe ) ) {
+				return true;
+			}
+		}
+
+		if ( in_array( $host, [ 'localhost', '127.0.0.1', '::1' ], true ) ) {
+			return true;
+		}
+
+		// Sous-domaines de recette, en tête de nom seulement : « dev.exemple.fr »
+		// est une recette, « developpement-durable.fr » n'en est pas une.
+		foreach ( [ 'staging', 'preprod', 'preproduction', 'recette', 'dev', 'test', 'demo', 'sandbox' ] as $etiquette ) {
+			if ( str_starts_with( $host, $etiquette . '.' ) ) {
+				return true;
+			}
+		}
+
+		return false;
 	}
 
 	/**
