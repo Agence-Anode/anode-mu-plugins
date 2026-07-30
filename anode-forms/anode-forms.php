@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Anode — formulaires
  * Description: Réception, validation, stockage et notification des formulaires. Versant serveur du moteur assets/js/form-engine.js, en remplacement de l'élément « formulaire » de Bricks.
- * Version:     1.7.0
+ * Version:     2.0.0
  * Author:      Anode
  *
  * Pourquoi ne pas utiliser l'élément de Bricks : un seul écran, une validation
@@ -27,7 +27,6 @@ if ( ! defined( 'ABSPATH' ) ) {
 }
 
 const VERSION   = '1.7.0';
-const POST_TYPE = 'anode_soumission';
 
 /** Envois autorisés par heure et par adresse IP. */
 const RATE_LIMIT = 10;
@@ -159,8 +158,6 @@ const DOSSIER_FICHIERS = 'anode-formulaires';
  */
 const PREFIXE_FICHIER = 'fichier_';
 
-/** Action d'administration qui sert une pièce jointe à qui a le droit de la lire. */
-const ACTION_FICHIER = 'anode-formulaire-fichier';
 
 /**
  * Répertoire des définitions, dans le thème du site.
@@ -468,38 +465,6 @@ function with_default_max_length( array $definition ): array {
  * recherche, de la corbeille et des permissions de WordPress, sans table
  * dédiée à maintenir.
  */
-add_action(
-	'init',
-	static function (): void {
-		register_post_type(
-			POST_TYPE,
-			[
-				'labels' => [
-					'name'          => 'Demandes reçues',
-					'singular_name' => 'Demande',
-					'menu_name'     => 'Demandes reçues',
-					'all_items'     => 'Demandes reçues',
-					'search_items'  => 'Rechercher une demande',
-					'not_found'     => 'Aucune demande.',
-				],
-				'public'              => false,
-				'show_ui'             => true,
-				'show_in_menu'        => true,
-				'show_in_rest'        => false,
-				'menu_icon'           => 'dashicons-email-alt',
-				'menu_position'       => 26,
-				'supports'            => [ 'title' ],
-				'capability_type'     => 'post',
-				'capabilities'        => [
-					// Une demande se lit et se supprime, elle ne se crée ni ne
-					// s'édite à la main : ce serait falsifier une trace.
-					'create_posts' => 'do_not_allow',
-				],
-				'map_meta_cap'        => true,
-			]
-		);
-	}
-);
 
 /* ------------------------------------------------------------------ */
 /* Réception                                                           */
@@ -614,6 +579,10 @@ function champ_public( $champ ): array {
 				'maxLength',
 				'maxSize',
 				'minLength',
+				// Sans elle, un `select` déclaré à choix multiple est rendu
+				// simple par le navigateur : une seule valeur part, et les
+				// autres réponses sont perdues sans un mot.
+				'multiple',
 				'name',
 				'options',
 				'pattern',
@@ -747,10 +716,13 @@ function handle( \WP_REST_Request $request ): \WP_REST_Response|\WP_Error {
 		return rest_ensure_response( [ 'ok' => true ] );
 	}
 
+	/*
+	 * Aucun identifiant n'est rendu : il n'y a rien d'enregistré à désigner.
+	 * En rendre un — fût-il zéro — ferait croire à une fiche consultable.
+	 */
 	return rest_ensure_response(
 		[
 			'ok'      => true,
-			'id'      => $resultat['id'],
 			'message' => $resultat['message'],
 		]
 	);
@@ -907,33 +879,62 @@ function traiter( string $name, array $definition, array $submitted, string $pag
 		);
 	}
 
-	$post_id = store( $name, $definition, $values, $page );
+	/*
+	 * Le site ne garde rien. Jamais.
+	 *
+	 * Une demande part vers ses relais — n8n, Make, l'outil du client — et la
+	 * donnée personnelle vit là-bas. Rien n'est écrit en base, aucun type de
+	 * contenu n'est déclaré, aucun écran d'administration ne liste des demandes.
+	 *
+	 * Ce n'est pas une préférence de rangement. Ce qui déplace réellement la
+	 * responsabilité d'un traitement, ce n'est pas l'endroit d'arrivée : c'est la
+	 * conservation. Une copie gardée « au cas où » laisse ici une durée à
+	 * justifier, une base à purger, un export à produire sur demande et un
+	 * effacement à prouver — pour une donnée dont le site n'a aucun usage.
+	 *
+	 * La conséquence est assumée : **un relais qui échoue perd la demande**. On
+	 * ne la rattrape pas en base, on le dit à la personne, tout de suite, pour
+	 * qu'elle recommence ou appelle. Une erreur franche vaut mieux qu'un « merci,
+	 * c'est envoyé » suivi d'un silence, et mieux qu'une copie de secours dont
+	 * plus personne ne se souvient six mois plus tard.
+	 */
+	$relais = relayer( $name, $definition, $values, $page, $fichiers );
 
-	if ( $post_id instanceof \WP_Error ) {
-		nettoyer_fichiers( $fichiers );
+	// Les fichiers ont été relayés avec le reste : ils n'ont plus rien à faire
+	// sur le disque, quel que soit le sort de l'envoi.
+	nettoyer_fichiers( $fichiers );
 
-		return $post_id;
+	if ( is_wp_error( $relais ) ) {
+		/*
+		 * Le journal du serveur garde la trace technique — l'URL visée et le
+		 * motif — sans aucune valeur saisie. C'est ce qu'il faut pour réparer
+		 * un relais cassé, et rien de ce qu'on s'est engagé à ne pas conserver.
+		 */
+		error_log( // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
+			sprintf( '[anode-forms] relais « %s » en échec : %s', $name, $relais->get_error_message() )
+		);
+
+		return new \WP_Error(
+			'anode_form_relay_failed',
+			(string) ( $definition['messages']['error']
+				?? __( 'Votre demande n’a pas pu être transmise. Réessayez dans un instant, ou contactez-nous directement.', 'anode' ) ),
+			[ 'status' => 502 ]
+		);
 	}
 
-	// Après l'enregistrement seulement : une pièce jointe est rattachée à la
-	// demande, et il n'y a pas de demande avant.
-	$fichiers = attacher_fichiers( $post_id, $fichiers );
-
-	notify( $name, $definition, $values, $post_id, $fichiers );
-
 	/**
-	 * Permet à un site de brancher un traitement supplémentaire — synchronisation
-	 * vers un outil métier, marquage, réponse automatique.
+	 * Permet à un site de brancher un traitement supplémentaire — appel à un
+	 * outil métier, marquage, réponse automatique.
 	 *
-	 * @param int                  $post_id    Identifiant de la demande enregistrée.
+	 * Aucun identifiant n'est passé : il n'y a rien d'enregistré à désigner.
+	 *
 	 * @param array<string, mixed> $values     Valeurs validées.
 	 * @param array<string, mixed> $definition Définition du formulaire.
 	 */
-	do_action( "anode/form/{$name}/submitted", $post_id, $values, $definition );
+	do_action( "anode/form/{$name}/submitted", $values, $definition );
 
 	return [
 		'ok'      => true,
-		'id'      => $post_id,
 		'message' => (string) ( $definition['messages']['success'] ?? 'Votre demande a bien été envoyée.' ),
 	];
 }
@@ -1409,13 +1410,23 @@ function champ_html( array $champ, string $form_id, mixed $valeur, string $erreu
 		foreach ( array_values( (array) ( $champ['options'] ?? [] ) ) as $rang => $option ) {
 			[ $ov, $ol ] = option_html( $option );
 
-			// L'étiquette entoure le bouton : l'association est implicite, et le
-			// libellé devient cliquable sans qu'aucun identifiant ait à concorder.
+			/*
+			 * Même balisage que celui du moteur : le repli doit produire des
+			 * champs identiques, sinon la feuille de style ne les habille qu'à
+			 * moitié — et le formulaire servi sans JavaScript ressemble à autre
+			 * chose que celui que tout le monde voit.
+			 *
+			 * L'étiquette entoure le bouton : l'association est implicite, et le
+			 * libellé devient cliquable sans qu'aucun identifiant ait à
+			 * concorder. Le bouton natif est masqué par le CSS, jamais retiré :
+			 * il garde le clavier, les flèches et le regroupement par `name`.
+			 */
 			$boutons .= sprintf(
-				'<label class="c-form__option"><input%s><span class="c-form__option-label">%s</span></label>',
+				'<label class="c-form__choice c-form__choice--radio"><span class="c-form__choice-text">%s</span><input%s><span class="c-form__choice-mark" aria-hidden="true"></span></label>',
+				esc_html( $ol ),
 				attributs_html(
 					[
-						'class'    => 'c-form__radio',
+						'class'    => 'c-form__choice-input',
 						'type'     => 'radio',
 						'id'       => $id . '-' . $rang,
 						'name'     => $nom,
@@ -1423,8 +1434,7 @@ function champ_html( array $champ, string $form_id, mixed $valeur, string $erreu
 						'checked'  => $ov === $val && '' !== $ov,
 						'required' => $obligatoire,
 					]
-				),
-				esc_html( $ol )
+				)
 			);
 		}
 
@@ -1432,7 +1442,7 @@ function champ_html( array $champ, string $form_id, mixed $valeur, string $erreu
 		// lui dessinerait une boîte autour. Et sans `radiogroup`, un lecteur
 		// d'écran annonce « 1 sur 3 » sans jamais dire de quoi.
 		$controle = sprintf(
-			'<div class="c-form__options" role="radiogroup" aria-labelledby="%s-label"%s>%s</div>',
+			'<div class="c-form__choices" role="radiogroup" aria-labelledby="%s-label"%s>%s</div>',
 			esc_attr( $id ),
 			attributs_html(
 				[
@@ -1775,7 +1785,11 @@ add_filter( 'the_content', __NAMESPACE__ . '\\injecter_replis', 20 );
  *
  * @param array<string, mixed> $field Définition du champ.
  */
-function sanitize_field( mixed $value, array $field ): string|\WP_Error {
+/**
+ * @return string|list<string>|\WP_Error Une liste seulement pour un `select`
+ *                                       déclaré à choix multiple.
+ */
+function sanitize_field( mixed $value, array $field ): string|array|\WP_Error {
 	$label = $field['label'] ?? ( $field['name'] ?? 'Champ' );
 	$type  = $field['type'] ?? 'text';
 
@@ -1794,8 +1808,56 @@ function sanitize_field( mixed $value, array $field ): string|\WP_Error {
 		$value = $value ? '1' : '';
 	}
 
-	if ( is_array( $value ) || is_object( $value ) ) {
+	/*
+	 * Un tableau n'est légitime que pour un `select` à choix multiple, et
+	 * seulement si la définition le déclare. Le vérifier ici plutôt que plus
+	 * bas ferme la porte à un envoi forgé qui passerait un tableau sur un champ
+	 * simple — la validation d'après le comparerait à chaque option et le
+	 * refuserait, mais un tableau imbriqué aurait déjà traversé les `trim` et
+	 * `strlen` qui suivent, avec des avertissements PHP dans le journal.
+	 */
+	$multiple = 'select' === $type && ! empty( $field['multiple'] );
+
+	if ( is_object( $value ) || ( is_array( $value ) && ! $multiple ) ) {
 		return new \WP_Error( 'invalid', sprintf( '%s : valeur inattendue.', $label ) );
+	}
+
+	if ( $multiple ) {
+		// Une liste de listes n'est pas une réponse : on refuse plutôt que
+		// d'aplatir, qui inventerait des valeurs que personne n'a choisies.
+		foreach ( (array) $value as $element ) {
+			if ( ! is_scalar( $element ) ) {
+				return new \WP_Error( 'invalid', sprintf( '%s : valeur inattendue.', $label ) );
+			}
+		}
+
+		$recues = array_values(
+			array_filter(
+				array_map( static fn ( $e ): string => trim( (string) $e ), (array) $value ),
+				'strlen'
+			)
+		);
+
+		if ( ! $recues ) {
+			return ! empty( $field['required'] )
+				? new \WP_Error( 'required', sprintf( '« %s » est obligatoire.', $label ) )
+				: [];
+		}
+
+		$options = array_map(
+			static fn ( $option ) => is_array( $option ) ? (string) ( $option['value'] ?? '' ) : (string) $option,
+			$field['options'] ?? []
+		);
+
+		foreach ( $recues as $recue ) {
+			if ( ! in_array( $recue, $options, true ) ) {
+				return new \WP_Error( 'invalid', sprintf( '%s : valeur hors liste.', $label ) );
+			}
+		}
+
+		// Les doublons d'un envoi forgé n'apportent rien et fausseraient un
+		// décompte en aval.
+		return array_values( array_unique( $recues ) );
 	}
 
 	$value = trim( (string) $value );
@@ -2214,26 +2276,6 @@ function proteger_dossier(): string {
 	return $base;
 }
 
-/**
- * Dossier de destination, le temps d'un téléversement.
- *
- * @param array<string, mixed> $dossiers Valeurs de `wp_upload_dir()`.
- *
- * @return array<string, mixed>
- */
-function dossier_des_pieces_jointes( array $dossiers ): array {
-	if ( ! empty( $dossiers['error'] ) ) {
-		return $dossiers;
-	}
-
-	// Le découpage par année et par mois est conservé : c'est ce qui empêche un
-	// dossier de plusieurs milliers d'entrées au bout de quelques années.
-	$dossiers['subdir'] = '/' . DOSSIER_FICHIERS . (string) ( $dossiers['subdir'] ?? '' );
-	$dossiers['path']   = (string) ( $dossiers['basedir'] ?? '' ) . $dossiers['subdir'];
-	$dossiers['url']    = (string) ( $dossiers['baseurl'] ?? '' ) . $dossiers['subdir'];
-
-	return $dossiers;
-}
 
 /**
  * Contrôle une pièce jointe, puis la range dans le dossier protégé.
@@ -2359,6 +2401,27 @@ function receptionner_fichier( array $envoi, array $field ): array|\WP_Error {
 }
 
 /**
+ * Dossier de destination, le temps d'un téléversement.
+ *
+ * @param array<string, mixed> $dossiers Valeurs de `wp_upload_dir()`.
+ *
+ * @return array<string, mixed>
+ */
+function dossier_des_pieces_jointes( array $dossiers ): array {
+	if ( ! empty( $dossiers['error'] ) ) {
+		return $dossiers;
+	}
+
+	// Le découpage par année et par mois est conservé : c'est ce qui empêche un
+	// dossier de plusieurs milliers d'entrées au bout de quelques années.
+	$dossiers['subdir'] = '/' . DOSSIER_FICHIERS . (string) ( $dossiers['subdir'] ?? '' );
+	$dossiers['path']   = (string) ( $dossiers['basedir'] ?? '' ) . $dossiers['subdir'];
+	$dossiers['url']    = (string) ( $dossiers['baseurl'] ?? '' ) . $dossiers['subdir'];
+
+	return $dossiers;
+}
+
+/**
  * Retire des fichiers déjà rangés — une demande refusée ne laisse rien.
  *
  * @param array<string, array<string, mixed>> $fichiers
@@ -2371,148 +2434,9 @@ function nettoyer_fichiers( array $fichiers ): void {
 	}
 }
 
-/**
- * Rattache les fichiers reçus à la demande, et retient leur identifiant.
- *
- * Passer par un contenu de type `attachment` n'est pas une coquetterie : c'est ce
- * qui donne à `wp_delete_attachment()` de quoi effacer le fichier **du disque**
- * quand la demande disparaît. Un chemin conservé dans une méta aurait survécu à
- * toutes les suppressions.
- *
- * @param array<string, array<string, mixed>> $fichiers
- *
- * @return array<string, array<string, mixed>>
- */
-function attacher_fichiers( int $post_id, array $fichiers ): array {
-	foreach ( $fichiers as $champ => $fichier ) {
-		$id = wp_insert_attachment(
-			[
-				'post_mime_type' => (string) $fichier['type'],
-				/*
-				 * Un intitulé neutre : le titre d'un attachement s'affiche dans la
-				 * Médiathèque, visible de tout compte ayant `read_private_posts`. Y
-				 * porter le nom du fichier d'origine — « CV Jean Dupont.pdf » —
-				 * exposait une donnée personnelle à un écran qui n'a rien à voir
-				 * avec la demande. Le vrai nom reste dans la méta de la demande.
-				 */
-				'post_title'     => sprintf(
-					'Pièce jointe — %s',
-					sanitize_text_field( (string) ( $fichier['champ'] ?? 'formulaire' ) )
-				),
-				// « private » plutôt que « inherit » : une pièce jointe qui hérite du
-				// statut de son parent suit ce que celui-ci deviendra, alors qu'une
-				// candidature n'a de statut public dans aucun cas de figure.
-				'post_status'    => 'private',
-				'post_parent'    => $post_id,
-			],
-			(string) $fichier['chemin'],
-			$post_id,
-			true
-		);
 
-		if ( is_wp_error( $id ) ) {
-			error_log( sprintf( '[anode-forms] pièce jointe non rattachée à la demande %d : %s.', $post_id, $id->get_error_message() ) ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
 
-			// Sans rattachement, plus rien ne relie ce fichier à personne : le
-			// laisser sur le disque serait le garder indéfiniment, sans finalité.
-			wp_delete_file( (string) $fichier['chemin'] );
-			unset( $fichiers[ $champ ] );
 
-			continue;
-		}
-
-		/*
-		 * Aucune métadonnée d'image n'est produite : les tailles intermédiaires
-		 * multiplieraient les copies d'un document personnel, et l'écran qui les
-		 * afficherait n'existe pas. `wp_delete_attachment()` sait supprimer le
-		 * fichier principal sans elles.
-		 */
-		update_post_meta( (int) $id, '_anode_fichier', $post_id );
-
-		$fichiers[ $champ ]['id'] = (int) $id;
-	}
-
-	if ( $fichiers ) {
-		/*
-		 * Le chemin sur le disque ne va pas en base : `get_attached_file()` le
-		 * redonne à partir de l'identifiant, tandis qu'une méta qui le contient finit
-		 * dans les exports et les sauvegardes, où elle décrit l'arborescence du
-		 * serveur à qui la lit.
-		 */
-		update_post_meta(
-			$post_id,
-			'_anode_fichiers',
-			array_map(
-				static fn ( array $fichier ): array => array_intersect_key( $fichier, array_flip( [ 'id', 'nom', 'taille', 'type' ] ) ),
-				$fichiers
-			)
-		);
-	}
-
-	return $fichiers;
-}
-
-/**
- * Lien de téléchargement d'une pièce jointe, dans l'administration.
- */
-function lien_fichier( int $attachment_id ): string {
-	return admin_url( sprintf( 'admin-post.php?action=%s&fichier=%d', ACTION_FICHIER, $attachment_id ) );
-}
-
-/*
- * Le fichier n'est jamais servi par le serveur web : il l'est par WordPress, une
- * fois la capacité vérifiée. C'est le pendant obligé du dossier interdit — sans
- * cette route, la pièce jointe serait protégée de tout le monde, y compris de la
- * personne à qui la demande est adressée.
- */
-add_action( 'admin_post_' . ACTION_FICHIER, __NAMESPACE__ . '\\servir_fichier' );
-
-function servir_fichier(): void {
-	$id     = isset( $_GET['fichier'] ) ? absint( $_GET['fichier'] ) : 0; // phpcs:ignore WordPress.Security.NonceVerification.Recommended
-	$piece  = $id ? get_post( $id ) : null;
-	$parent = (int) get_post_meta( $id, '_anode_fichier', true );
-
-	// La méta fait office de laissez-passer : sans elle, la route servirait
-	// n'importe quel média du site à qui sait éditer une demande.
-	if ( ! $piece instanceof \WP_Post || 'attachment' !== $piece->post_type || ! $parent ) {
-		wp_die( 'Pièce jointe introuvable.', '', [ 'response' => 404 ] );
-	}
-
-	/*
-	 * Une capacité, pas un jeton.
-	 *
-	 * Un nonce est lié à l'utilisateur et périmé au bout de vingt-quatre heures :
-	 * placé dans le lien d'une notification, il serait mort pour tout le monde, y
-	 * compris pour son destinataire. Un téléchargement ne modifie rien — ce que le
-	 * jeton protège n'est pas en jeu ici, la permission l'est.
-	 */
-	if ( ! current_user_can( 'edit_post', $parent ) ) {
-		wp_die( 'Vous n’avez pas accès à cette pièce jointe.', '', [ 'response' => 403 ] );
-	}
-
-	$chemin = get_attached_file( $id );
-
-	if ( ! $chemin || ! is_readable( (string) $chemin ) ) {
-		wp_die( 'Fichier absent du serveur.', '', [ 'response' => 404 ] );
-	}
-
-	/*
-	 * Servi en pièce à télécharger, et jamais rendu.
-	 *
-	 * Un document affiché en ligne s'exécute dans l'origine du site : une page
-	 * HTML déguisée y lirait la session de l'administrateur qui l'ouvre. Le type
-	 * générique et `nosniff` retirent au navigateur toute latitude d'interpréter.
-	 */
-	nocache_headers();
-	header( 'Content-Type: application/octet-stream' );
-	header( 'X-Content-Type-Options: nosniff' );
-	header( 'Content-Disposition: attachment; filename="' . sanitize_file_name( (string) get_the_title( $id ) ) . '"' );
-	header( 'Content-Length: ' . (string) filesize( (string) $chemin ) );
-
-	readfile( (string) $chemin ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_readfile
-
-	exit;
-}
 
 /*
  * La pièce jointe suit la demande. Toujours.
@@ -2522,20 +2446,6 @@ function servir_fichier(): void {
  * du fichier dans chacun d'eux en aurait laissé un dehors, et le CV serait resté
  * sur le disque, dans un dossier que plus rien ne relie à personne.
  */
-add_action(
-	'before_delete_post',
-	static function ( $post_id ): void {
-		if ( POST_TYPE !== get_post_type( (int) $post_id ) ) {
-			return;
-		}
-
-		foreach ( (array) get_post_meta( (int) $post_id, '_anode_fichiers', true ) as $fichier ) {
-			if ( ! empty( $fichier['id'] ) ) {
-				wp_delete_attachment( (int) $fichier['id'], true );
-			}
-		}
-	}
-);
 
 /* ------------------------------------------------------------------ */
 /* Enregistrement et notification                                      */
@@ -2545,147 +2455,257 @@ add_action(
  * @param array<string, mixed>  $definition Définition du formulaire.
  * @param array<string, string> $values     Valeurs validées.
  */
-function store( string $name, array $definition, array $values, string $page ): int|\WP_Error {
-	/*
-	 * Ni adresse ni nom dans le titre.
-	 *
-	 * Le titre d'un contenu voyage : il apparaît dans les listes, dans le slug,
-	 * donc dans le permalien, et dans toute API qui énumère les contenus. Y
-	 * mettre l'adresse du demandeur, c'est la diffuser bien au-delà de la fiche
-	 * — le pont REST la servait à tout compte d'édition. Elle reste dans les
-	 * champs, visibles sur la fiche, par les seules personnes habilitées.
-	 */
-	$title = sprintf(
-		'%s — %s',
-		$definition['label'] ?? ucfirst( $name ),
-		wp_date( 'j F Y à H\hi' )
-	);
+/**
+ * Le relevé de traçage envoyé par le navigateur, assaini.
+ *
+ * Il arrive tel quel du client : rien n'y est cru sur parole. Seules les clés
+ * connues sont retenues, chacune en chaîne courte — sans ce filtre, une page
+ * pourrait gonfler le corps relayé à volonté, ou glisser une structure que le
+ * scénario en aval interpréterait de travers.
+ *
+ * @return array<string, string>
+ */
+function tracage_recu(): array {
+	$connues = [
+		'utm_source',
+		'utm_medium',
+		'utm_campaign',
+		'utm_term',
+		'utm_content',
+		'gclid',
+		'fbclid',
+		'msclkid',
+		'ttclid',
+		'li_fat_id',
+		'_fbc',
+		'_fbp',
+		'referrer',
+	];
 
-	$post_id = wp_insert_post(
-		[
-			'post_type'   => POST_TYPE,
-			'post_title'  => sanitize_text_field( $title ),
-			'post_status' => 'publish',
-		],
-		true
-	);
+	$brut = $_POST['tracking'] ?? null; // phpcs:ignore WordPress.Security.NonceVerification.Missing
 
-	if ( is_wp_error( $post_id ) ) {
-		return new \WP_Error( 'anode_form_store', 'Enregistrement impossible.', [ 'status' => 500 ] );
+	// Sur la voie multipart, le relevé voyage en JSON dans un champ de texte.
+	if ( is_string( $brut ) ) {
+		$brut = json_decode( wp_unslash( $brut ), true );
 	}
 
-	$post_id = (int) $post_id;
-
-	update_post_meta( $post_id, '_anode_form', $name );
-	update_post_meta( $post_id, '_anode_values', $values );
-	update_post_meta( $post_id, '_anode_page', sanitize_text_field( $page ) );
-
-	/*
-	 * L'adresse IP n'est pas conservée.
-	 *
-	 * Elle l'était « au cas où ». Or une donnée personnelle se garde pour une
-	 * finalité, pas par précaution : c'est le principe de minimisation
-	 * (RGPD art. 5.1.c). La seule finalité réelle — limiter le rythme des
-	 * envois — est déjà servie par un compteur temporaire indexé sur une
-	 * empreinte, qui expire au bout d'une heure et ne permet de remonter à
-	 * personne.
-	 */
-
-	$consentement = consent_proof( $name, $definition, $values );
-
-	if ( $consentement ) {
-		// Prouver le consentement suppose de savoir *à quoi* la personne a
-		// consenti, et quand (RGPD art. 7.1). Le seul « 1 » du champ ne le dit
-		// pas : on conserve le texte exact qui était affiché.
-		update_post_meta( $post_id, '_anode_consentement', $consentement );
+	if ( ! is_array( $brut ) ) {
+		return [];
 	}
 
-	return $post_id;
+	$propre = [];
+
+	foreach ( $connues as $clef ) {
+		$valeur = $brut[ $clef ] ?? null;
+
+		if ( is_scalar( $valeur ) && '' !== (string) $valeur ) {
+			$propre[ $clef ] = mb_substr( sanitize_text_field( (string) $valeur ), 0, 500 );
+		}
+	}
+
+	return $propre;
 }
 
 /**
- * @param array<string, mixed>                $definition Définition du formulaire.
- * @param array<string, string>               $values     Valeurs validées.
- * @param array<string, array<string, mixed>> $fichiers   Pièces jointes rattachées.
+ * Adresses de relais déclarées, retenues et valides.
+ *
+ * `"webhook": "https://…"` pour une, `"webhooks": [ … ]` pour plusieurs. Ni
+ * l'une ni l'autre ne sort vers le navigateur : elles ne figurent pas dans la
+ * liste blanche de `describe()`. Une URL de scénario n8n ou Make est un point
+ * d'entrée ouvert — la connaître suffit à y déverser n'importe quoi.
+ *
+ * Trois refus, et le troisième est celui qu'on oublie :
+ *
+ * - **HTTPS seulement.** En clair, la demande traverserait le réseau lisible.
+ * - **URL bien formée**, sinon on ne sait pas où l'on écrit.
+ * - **Jamais une adresse IP littérale.** Un webhook pointant sur `169.254.169.254`,
+ *   `127.0.0.1` ou `10.0.0.5` fait poster le serveur **contre lui-même ou contre
+ *   son réseau interne** — c'est la porte d'entrée classique vers les
+ *   métadonnées d'un hébergeur cloud. Le nom d'hôte, lui, doit se résoudre.
+ *
+ * Cinq au maximum : au-delà, une demande attendrait la ronde de tous les
+ * destinataires avant que le visiteur ne voie sa confirmation.
+ *
+ * @return list<string>
  */
-function notify( string $name, array $definition, array $values, int $post_id, array $fichiers = [] ): void {
-	$to = $definition['notify'] ?? get_option( 'admin_email' );
+function relais_declares( array $definition ): array {
+	$brutes = [];
 
-	if ( ! $to ) {
-		return;
+	if ( isset( $definition['webhook'] ) && is_string( $definition['webhook'] ) ) {
+		$brutes[] = $definition['webhook'];
 	}
 
-	$lines = [];
-
-	foreach ( fields_of( $definition ) as $field_name => $field ) {
-		$lines[] = sprintf( '%s : %s', $field['label'] ?? $field_name, $values[ $field_name ] ?? '—' );
+	foreach ( (array) ( $definition['webhooks'] ?? [] ) as $url ) {
+		if ( is_string( $url ) ) {
+			$brutes[] = $url;
+		}
 	}
 
-	/*
-	 * La pièce jointe est annoncée, pas jointe.
-	 *
-	 * L'attacher au message enverrait un document personnel traverser tous les
-	 * relais du chemin, puis dormir dans autant de boîtes qu'il y a de
-	 * destinataires — hors de toute durée de conservation, et hors de portée de
-	 * l'effacement que le site promet. Sans compter les limites de taille, qui
-	 * feraient perdre la notification elle-même. Le lien, lui, exige d'être
-	 * connecté au site pour rendre quoi que ce soit.
-	 */
-	foreach ( $fichiers as $champ => $fichier ) {
-		if ( empty( $fichier['id'] ) ) {
+	$retenues = [];
+
+	foreach ( array_slice( $brutes, 0, 5 ) as $url ) {
+		$url = trim( $url );
+
+		if ( '' === $url || 0 !== stripos( $url, 'https://' ) || ! wp_http_validate_url( $url ) ) {
 			continue;
 		}
 
-		$lines[] = '';
-		$lines[] = sprintf(
-			'Pièce jointe — %s : %s (%s)',
-			fields_of( $definition )[ $champ ]['label'] ?? $champ,
-			(string) $fichier['nom'],
-			size_format( (int) $fichier['taille'] )
-		);
-		$lines[] = sprintf( 'Télécharger : %s', lien_fichier( (int) $fichier['id'] ) );
+		// `parse_url` rend une IPv6 entre crochets, que `FILTER_VALIDATE_IP`
+		// ne reconnaît pas : on les retire avant de juger.
+		$hote = (string) wp_parse_url( $url, PHP_URL_HOST );
+
+		if ( '' === $hote || false !== filter_var( trim( $hote, '[]' ), FILTER_VALIDATE_IP ) ) {
+			continue;
+		}
+
+		$retenues[] = $url;
 	}
 
-	$lines[] = '';
+	return array_values( array_unique( $retenues ) );
+}
+
+/**
+ * Relaie la demande vers les webhooks déclarés.
+ *
+ * Le corps est **plat** : chaque réponse à sa clé, à la racine. C'est la forme
+ * qu'un scénario n8n ou Make lit sans configuration — imbriquer sous `fields`
+ * obligerait à écrire un nœud de transformation dans chaque scénario.
+ *
+ * Tout part : les champs visibles, les champs cachés, et le contexte de l'envoi
+ * sous des clés préfixées `_`, qui ne peuvent donc pas entrer en collision avec
+ * un nom de champ — `sanitize_key()` interdit le tiret bas initial dans une
+ * définition.
+ *
+ * Succès dès qu'**un** destinataire a répondu : deux scénarios branchés sur le
+ * même formulaire ne doivent pas se rendre l'un l'autre indisponibles.
+ *
+ * @return true|\WP_Error true si aucun relais n'est déclaré, ou si l'un a répondu.
+ */
+function relayer( string $name, array $definition, array $values, string $page, array $fichiers = [] ) {
+	$urls = relais_declares( $definition );
+
+	if ( ! $urls ) {
+		// Aucune adresse retenue alors qu'il y en avait de déclarées : ce n'est
+		// pas « pas de webhook », c'est une déclaration fautive, et la taire
+		// ferait croire à un relais qui n'a jamais eu lieu.
+		$declare = isset( $definition['webhook'] ) || isset( $definition['webhooks'] );
+
+		return $declare
+			? new \WP_Error( 'anode_form_webhook', 'Aucune adresse de relais valable : HTTPS et nom d’hôte exigés.' )
+			: true;
+	}
 
 	/*
-	 * L'URL est construite, pas demandée à `get_edit_post_link`.
+	 * Tout ce que l'outil en aval peut vouloir, en une seule fois.
 	 *
-	 * Celle-ci rend `null` quand l'utilisateur courant n'a pas la capacité
-	 * `edit_post` sur le contenu — et un envoi public n'a aucun utilisateur
-	 * courant. Le lien de la notification était donc vide dans tous les cas.
+	 * Le partage des rôles n'est pas arbitraire : le navigateur fournit ce que
+	 * lui seul connaît — paramètres de campagne, cookies publicitaires,
+	 * référent — et le serveur fournit ce que lui seul peut **attester** :
+	 * l'adresse IP, l'agent, l'horodatage. Prendre l'IP dans le corps envoyé par
+	 * le client reviendrait à laisser n'importe qui la choisir.
+	 *
+	 * Les champs restent groupés sous `fields` : un CRM veut savoir ce qui est
+	 * une réponse et ce qui est du contexte, et un champ nommé `page_url`
+	 * écraserait sinon celui du contexte.
 	 */
-	$lines[] = sprintf(
-		'Voir dans l’administration : %s',
-		admin_url( sprintf( 'post.php?post=%d&action=edit', $post_id ) )
-	);
+	/*
+	 * Les pièces jointes partent dans le même envoi, encodées en base64.
+	 *
+	 * Le site ne garde rien : un fichier laissé sur le disque en attendant que
+	 * quelqu'un vienne le chercher serait précisément la copie qu'on refuse. Un
+	 * lien de téléchargement ne conviendrait pas davantage — il faudrait garder
+	 * le fichier pour que le lien mène quelque part.
+	 *
+	 * L'encodage grossit d'un tiers : une pièce de 2 Mo pèse 2,7 Mo dans le
+	 * corps. C'est le prix du même envoi, et il reste sous ce que n8n comme
+	 * Make acceptent.
+	 */
+	$pieces = [];
 
-	$reponse = reply_to( $definition, $values );
+	foreach ( $fichiers as $champ => $fichier ) {
+		$chemin = (string) ( $fichier['chemin'] ?? '' );
 
-	$envoye = wp_mail(
-		$to,
-		sprintf( '[%s] %s', get_bloginfo( 'name' ), $definition['label'] ?? ucfirst( $name ) ),
-		implode( "\n", $lines ),
-		// Répondre au message doit répondre au demandeur, pas au site.
-		$reponse ? [ 'Reply-To: ' . $reponse ] : []
-	);
+		if ( '' === $chemin || ! is_readable( $chemin ) ) {
+			continue;
+		}
 
-	if ( ! $envoye ) {
-		/*
-		 * La demande est enregistrée quoi qu'il arrive — mais un échec muet ne se
-		 * distingue pas d'un succès : personne n'est prévenu, et la demande dort
-		 * dans l'administration jusqu'à ce que quelqu'un pense à y regarder.
-		 */
-		// `wp_mail()` accepte un tableau de destinataires : le passer à `sprintf`
-		// émettrait un « Array to string conversion » au moment précis où l'on
-		// cherche à comprendre pourquoi la notification n'est pas partie.
-		$destinataire = is_array( $to ) ? implode( ', ', $to ) : (string) $to;
+		$contenu = file_get_contents( $chemin ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents
 
-		error_log( sprintf( '[anode-forms] notification non envoyée à %s pour la demande %d (formulaire « %s »).', $destinataire, $post_id, $name ) ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
+		if ( false === $contenu ) {
+			continue;
+		}
 
-		update_post_meta( $post_id, '_anode_notification', 'echec' );
+		$pieces[] = [
+			'field'     => (string) $champ,
+			// Le nom d'origine, pas celui du disque : le second porte un
+			// segment aléatoire, posé pour qu'on ne puisse pas deviner l'URL.
+			'name'      => (string) ( $fichier['nom'] ?? basename( $chemin ) ),
+			'mime_type' => (string) ( $fichier['type'] ?? '' ),
+			'size'      => strlen( $contenu ),
+			'content'   => base64_encode( $contenu ), // phpcs:ignore WordPress.PHP.DiscouragedPHPFunctions.obfuscation_base64_encode
+		];
 	}
+
+	$corps = wp_json_encode(
+		[
+			'form'         => $name,
+			'fields'       => $values,
+			'files'        => $pieces,
+			'tracking'     => tracage_recu(),
+			'page_url'     => '' !== $page ? home_url( $page ) : home_url( '/' ),
+			'site'         => home_url( '/' ),
+			'submitted_at' => gmdate( 'c' ),
+			'user_agent'   => isset( $_SERVER['HTTP_USER_AGENT'] ) ? sanitize_text_field( wp_unslash( (string) $_SERVER['HTTP_USER_AGENT'] ) ) : '',
+			'address_ip'   => function_exists( 'Anode\\Hardening\\client_ip' )
+				? \Anode\Hardening\client_ip()
+				: ( is_string( $_SERVER['REMOTE_ADDR'] ?? null ) ? sanitize_text_field( wp_unslash( $_SERVER['REMOTE_ADDR'] ) ) : '' ),
+		]
+	);
+
+	$echecs = [];
+	$reussi = 0;
+
+	foreach ( $urls as $url ) {
+		$reponse = wp_remote_post(
+			$url,
+			[
+				'timeout'     => 15,
+				// Une redirection changerait le destinataire sans qu'on le sache.
+				'redirection' => 0,
+				'sslverify'   => true,
+				'headers'     => [ 'Content-Type' => 'application/json; charset=utf-8' ],
+				'body'        => (string) $corps,
+			]
+		);
+
+		if ( is_wp_error( $reponse ) ) {
+			$echecs[] = $reponse->get_error_message();
+
+			continue;
+		}
+
+		$code = (int) wp_remote_retrieve_response_code( $reponse );
+
+		if ( $code >= 200 && $code < 300 ) {
+			++$reussi;
+
+			continue;
+		}
+
+		$echecs[] = sprintf( 'HTTP %d', $code );
+	}
+
+	if ( $reussi > 0 ) {
+		return true;
+	}
+
+	return new \WP_Error(
+		'anode_form_webhook',
+		sprintf( 'Aucun relais n’a abouti (%s).', implode( ', ', array_unique( $echecs ) ) )
+	);
 }
+
+
 
 /**
  * Adresse de réponse : la valeur du premier champ de type « email ».
@@ -2776,144 +2796,12 @@ add_action( 'anode/forms/purge', __NAMESPACE__ . '\\purge' );
  *
  * @return int Nombre de demandes effacées.
  */
-function purge(): int {
-	$efface = 0;
-
-	foreach ( get_posts(
-		[
-			'post_type'      => POST_TYPE,
-			'post_status'    => 'any',
-			'posts_per_page' => 200,
-			/*
-			 * Du plus ancien au plus récent, explicitement.
-			 *
-			 * `get_posts` trie par date décroissante : le lot de 200 ne contenait
-			 * donc que les demandes les plus fraîches — jamais celles qui avaient
-			 * atteint leur terme. Passé deux cents demandes, la purge tournait
-			 * chaque jour sans rien effacer, et la promesse faite au visiteur
-			 * n'était plus tenue par personne.
-			 *
-			 * Le lot suffit : celles qui restent seront prises le lendemain.
-			 */
-			'orderby'        => 'date',
-			'order'          => 'ASC',
-			'fields'         => 'ids',
-			'no_found_rows'  => true,
-		]
-	) as $post_id ) {
-		$name       = (string) get_post_meta( $post_id, '_anode_form', true );
-		$definition = definition( $name ) ?? [];
-		$jours      = (int) ( $definition['retention'] ?? RETENTION );
-		$limite     = strtotime( sprintf( '-%d days', max( 1, $jours ) ) );
-
-		if ( get_post_timestamp( $post_id ) < $limite ) {
-			wp_delete_post( $post_id, true );
-			$efface += 1;
-		}
-	}
-
-	if ( $efface ) {
-		// Une purge silencieuse ne se distingue pas d'une purge qui ne tourne
-		// pas : on garde la trace du nombre, jamais du contenu.
-		update_option(
-			'anode_forms_derniere_purge',
-			[ 'date' => current_time( 'c' ), 'effacees' => $efface ],
-			false
-		);
-	}
-
-	return $efface;
-}
 
 /* ------------------------------------------------------------------ */
 /* Administration                                                      */
 /* ------------------------------------------------------------------ */
 
 /** Les valeurs reçues s'affichent sur la fiche, sans avoir à fouiller. */
-add_action(
-	'add_meta_boxes',
-	static function (): void {
-		add_meta_box(
-			'anode-form-values',
-			'Réponses',
-			static function ( \WP_Post $post ): void {
-				$values = get_post_meta( $post->ID, '_anode_values', true );
-				$form   = (string) get_post_meta( $post->ID, '_anode_form', true );
-				$fields = fields_of( definition( $form ) ?? [] );
-
-				if ( ! is_array( $values ) || ! $values ) {
-					echo '<p>Aucune réponse enregistrée.</p>';
-
-					return;
-				}
-
-				echo '<table class="widefat striped"><tbody>';
-
-				$fichiers = (array) get_post_meta( $post->ID, '_anode_fichiers', true );
-
-				foreach ( $values as $key => $value ) {
-					// Une pièce jointe a sa propre ligne, avec son lien : l'afficher
-					// deux fois donnerait à croire à deux réponses distinctes.
-					if ( isset( $fichiers[ $key ] ) ) {
-						continue;
-					}
-
-					printf(
-						'<tr><th style="width:220px">%s</th><td>%s</td></tr>',
-						esc_html( $fields[ $key ]['label'] ?? $key ),
-						nl2br( esc_html( (string) $value ) )
-					);
-				}
-
-				/*
-				 * Le lien de téléchargement se trouve ici, et nulle part ailleurs :
-				 * le fichier n'est pas servi par le serveur web, et le chercher
-				 * dans la médiathèque ne donnerait qu'un nom tiré au sort.
-				 */
-				foreach ( $fichiers as $champ => $fichier ) {
-					if ( empty( $fichier['id'] ) ) {
-						continue;
-					}
-
-					printf(
-						'<tr><th>%s</th><td><a href="%s">%s</a> — %s</td></tr>',
-						esc_html( $fields[ $champ ]['label'] ?? $champ ),
-						esc_url( lien_fichier( (int) $fichier['id'] ) ),
-						esc_html( (string) ( $fichier['nom'] ?? 'Pièce jointe' ) ),
-						esc_html( size_format( (int) ( $fichier['taille'] ?? 0 ) ) )
-					);
-				}
-
-				printf(
-					'<tr><th>Page</th><td>%s</td></tr>',
-					esc_html( (string) get_post_meta( $post->ID, '_anode_page', true ) )
-				);
-
-				// Une notification perdue se voit ici, sinon nulle part : la
-				// demande aurait l'air d'avoir été relayée alors qu'elle dort.
-				if ( 'echec' === get_post_meta( $post->ID, '_anode_notification', true ) ) {
-					echo '<tr><th>Notification</th><td><strong>Non envoyée</strong> — vérifiez la '
-						. 'configuration d’envoi des e‑mails du site.</td></tr>';
-				}
-
-				$consentement = get_post_meta( $post->ID, '_anode_consentement', true );
-
-				if ( is_array( $consentement ) && $consentement ) {
-					printf(
-						'<tr><th>Consentement</th><td>%s<br><em>%s</em></td></tr>',
-						esc_html( wp_date( 'j F Y à H\\hi', (int) strtotime( (string) $consentement['date'] ) ) ),
-						esc_html( (string) $consentement['texte'] )
-					);
-				}
-
-				echo '</tbody></table>';
-			},
-			POST_TYPE,
-			'normal',
-			'high'
-		);
-	}
-);
 
 /* ------------------------------------------------------------------ */
 /* RGPD — droit d'accès et droit à l'effacement                        */
@@ -2939,169 +2827,19 @@ add_action(
  * @param int    $page  Page, à partir de 1.
  * @return array<int, \WP_Post>
  */
-function demandes_de( string $email, int $page = 1 ): array {
-	$lot = 50;
+/**
+ * Le lot lu à chaque passage. La valeur est partagée par les deux appelants :
+ * c'est elle qui décide si une page est pleine, donc s'il en reste une autre.
+ */
+const LOT_RGPD = 50;
 
-	$posts = get_posts(
-		[
-			'post_type'      => POST_TYPE,
-			'post_status'    => 'any',
-			'posts_per_page' => $lot,
-			'paged'          => max( 1, $page ),
-			'orderby'        => 'ID',
-			'order'          => 'ASC',
-			// Pas de `meta_query` : les valeurs sont rangées dans un tableau
-			// sérialisé, qu'une comparaison SQL ne sait pas fouiller sans risque
-			// de faux positif sur une sous-chaîne.
-			'fields'         => '',
-		]
-	);
 
-	$cherche = strtolower( trim( $email ) );
-
-	return array_values(
-		array_filter(
-			$posts,
-			static function ( \WP_Post $post ) use ( $cherche ): bool {
-				foreach ( (array) get_post_meta( $post->ID, '_anode_values', true ) as $valeur ) {
-					if ( is_string( $valeur ) && strtolower( trim( $valeur ) ) === $cherche ) {
-						return true;
-					}
-				}
-
-				return false;
-			}
-		)
-	);
-}
-
-add_filter(
-	'wp_privacy_personal_data_exporters',
-	static function ( array $exporteurs ): array {
-		$exporteurs['anode-forms'] = [
-			'exporter_friendly_name' => __( 'Demandes reçues par formulaire', 'anode' ),
-			'callback'               => __NAMESPACE__ . '\\exporter_donnees',
-		];
-
-		return $exporteurs;
-	}
-);
 
 /**
  * @return array{data: array<int, array<string, mixed>>, done: bool}
  */
-function exporter_donnees( string $email, int $page = 1 ): array {
-	$trouvees = demandes_de( $email, $page );
-	$elements = [];
 
-	foreach ( $trouvees as $post ) {
-		$champs = [
-			[
-				'name'  => __( 'Reçue le', 'anode' ),
-				'value' => get_the_date( 'c', $post ),
-			],
-			[
-				'name'  => __( 'Formulaire', 'anode' ),
-				'value' => (string) get_post_meta( $post->ID, '_anode_form', true ),
-			],
-			[
-				'name'  => __( 'Page d’origine', 'anode' ),
-				'value' => (string) get_post_meta( $post->ID, '_anode_page', true ),
-			],
-		];
-
-		foreach ( (array) get_post_meta( $post->ID, '_anode_values', true ) as $clef => $valeur ) {
-			$champs[] = [
-				'name'  => (string) $clef,
-				'value' => is_scalar( $valeur ) ? (string) $valeur : wp_json_encode( $valeur ),
-			];
-		}
-
-		/*
-		 * Les pièces jointes sont **nommées** dans l'export, avec leur lien de
-		 * téléchargement.
-		 *
-		 * Le format du noyau ne transporte que des couples nom/valeur : le fichier
-		 * lui-même ne peut pas y entrer. L'omettre laisserait pourtant croire que le
-		 * site ne détient qu'un formulaire de texte, alors qu'il garde un CV — un
-		 * inventaire incomplet vaut réponse incomplète à une demande d'accès
-		 * (RGPD art. 15).
-		 */
-		foreach ( (array) get_post_meta( $post->ID, '_anode_fichiers', true ) as $champ => $fichier ) {
-			$champs[] = [
-				'name'  => sprintf( '%s (pièce jointe)', (string) $champ ),
-				'value' => sprintf(
-					'%s — %s — %s',
-					(string) ( $fichier['nom'] ?? '' ),
-					size_format( (int) ( $fichier['taille'] ?? 0 ) ),
-					empty( $fichier['id'] ) ? '' : lien_fichier( (int) $fichier['id'] )
-				),
-			];
-		}
-
-		$consentement = get_post_meta( $post->ID, '_anode_consentement', true );
-
-		if ( $consentement ) {
-			$champs[] = [
-				'name'  => __( 'Preuve de consentement', 'anode' ),
-				'value' => is_scalar( $consentement ) ? (string) $consentement : wp_json_encode( $consentement ),
-			];
-		}
-
-		$elements[] = [
-			'group_id'    => 'anode-forms',
-			'group_label' => __( 'Demandes reçues par formulaire', 'anode' ),
-			'item_id'     => 'anode-form-' . $post->ID,
-			'data'        => $champs,
-		];
-	}
-
-	// `done` à faux tant qu'une page est pleine : le noyau rappellera la suivante.
-	return [
-		'data' => $elements,
-		'done' => count( $trouvees ) < 50,
-	];
-}
-
-add_filter(
-	'wp_privacy_personal_data_erasers',
-	static function ( array $effaceurs ): array {
-		$effaceurs['anode-forms'] = [
-			'eraser_friendly_name' => __( 'Demandes reçues par formulaire', 'anode' ),
-			'callback'             => __NAMESPACE__ . '\\effacer_donnees',
-		];
-
-		return $effaceurs;
-	}
-);
 
 /**
  * @return array{items_removed: bool, items_retained: bool, messages: array<int, string>, done: bool}
  */
-function effacer_donnees( string $email, int $page = 1 ): array {
-	$trouvees = demandes_de( $email, $page );
-	$retirees = 0;
-
-	foreach ( $trouvees as $post ) {
-		/*
-		 * Suppression définitive, pas la corbeille : une demande mise à la
-		 * corbeille reste en base, et l'on aurait répondu « effacé » à une
-		 * personne dont les données sont toujours là.
-		 *
-		 * Les pièces jointes partent avec elle : `before_delete_post` les efface du
-		 * disque. C'est ce crochet qui garantit qu'aucune des trois voies de
-		 * suppression — celle-ci, la purge, la corbeille vidée à la main — ne laisse
-		 * un document personnel derrière elle.
-		 */
-		if ( wp_delete_post( $post->ID, true ) ) {
-			++$retirees;
-		}
-	}
-
-	return [
-		'items_removed'  => $retirees > 0,
-		'items_retained' => false,
-		'messages'       => [],
-		'done'           => count( $trouvees ) < 50,
-	];
-}

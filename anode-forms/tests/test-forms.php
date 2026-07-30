@@ -243,6 +243,48 @@ function get_the_date( string $format = '', $post = null ): string {
 		return $thing instanceof \WP_Error;
 	}
 
+	/*
+	 * Le relais est désormais **la** sortie d'une demande : rien n'est
+	 * enregistré, tout part vers les webhooks déclarés. Ces doublures retiennent
+	 * ce qui a été envoyé, et permettent de faire échouer un envoi à volonté.
+	 */
+	function wp_remote_post( string $url, array $args = [] ): mixed {
+		$GLOBALS['anode_relais'][] = [
+			'url'  => $url,
+			'body' => json_decode( (string) ( $args['body'] ?? '' ), true ),
+		];
+
+		if ( ! empty( $GLOBALS['anode_relais_echoue'] ) ) {
+			return new \WP_Error( 'http_request_failed', 'relais injoignable' );
+		}
+
+		return [ 'response' => [ 'code' => 200 ], 'body' => 'ok' ];
+	}
+
+	/**
+	 * Doublure de la validation d'URL sortante.
+	 *
+	 * La vraie fonction interroge le réseau — résolution DNS comprise — ce qu'un
+	 * banc d'essai ne doit pas faire. Le contrôle qui compte pour le relais est
+	 * celui de `relais_declares()` : HTTPS exigé, adresse IP littérale refusée.
+	 * Il est éprouvé par ses propres tests, sans réseau.
+	 */
+	function wp_json_encode( mixed $valeur, int $options = 0 ): string|false {
+		return json_encode( $valeur, $options | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES );
+	}
+
+	function wp_http_validate_url( string $url ): string|false {
+		return str_starts_with( $url, 'https://' ) ? $url : false;
+	}
+
+	function wp_remote_retrieve_response_code( mixed $reponse ): int {
+		return is_array( $reponse ) ? (int) ( $reponse['response']['code'] ?? 0 ) : 0;
+	}
+
+	function wp_remote_retrieve_body( mixed $reponse ): string {
+		return is_array( $reponse ) ? (string) ( $reponse['body'] ?? '' ) : '';
+	}
+
 	function wp_insert_post( array $post, bool $wp_error = false ): mixed {
 		$id = $GLOBALS['anode_next_id']++;
 
@@ -597,6 +639,9 @@ function get_the_date( string $format = '', $post = null ): string {
 		'contact',
 		[
 			'label'         => 'Nous contacter',
+			// Le relais est la seule sortie : rien n'est enregistré, et une
+			// définition sans webhook n'aurait aucun effet observable.
+			'webhook'       => 'https://relais.exemple.test/contact',
 			'notify'        => 'contact@exemple.fr',
 			'retention'     => 365,
 			// Clé qu'aucune version de la route publique n'a jamais eu à servir :
@@ -646,6 +691,7 @@ function get_the_date( string $format = '', $post = null ): string {
 		'candidature',
 		[
 			'label'  => 'Candidature',
+			'webhook'   => 'https://relais.exemple.test/essai',
 			'notify' => 'rh@exemple.fr',
 			'fields' => [
 				[ 'name' => 'nom', 'label' => 'Nom', 'type' => 'text', 'required' => true ],
@@ -667,6 +713,7 @@ function get_the_date( string $format = '', $post = null ): string {
 		'rappel',
 		[
 			'label'    => 'Demande de rappel',
+			'webhook'   => 'https://relais.exemple.test/essai',
 			// Piège renommé : le moteur doit suivre la définition, pas la constante.
 			'honeypot' => '_url_site',
 			'fields'   => [
@@ -685,6 +732,7 @@ function get_the_date( string $format = '', $post = null ): string {
 		'qualification',
 		[
 			'label'   => 'Qualification',
+			'webhook'   => 'https://relais.exemple.test/essai',
 			'notify'  => 'commercial@exemple.fr',
 			'screens' => [
 				[
@@ -738,6 +786,7 @@ function get_the_date( string $format = '', $post = null ): string {
 		'mauvaise-condition',
 		[
 			'label'   => 'Définition fautive',
+			'webhook'   => 'https://relais.exemple.test/essai',
 			'screens' => [
 				[ 'fields' => [ [ 'name' => 'siret', 'label' => 'SIRET', 'type' => 'text', 'showIf' => [ 'field' => 'profil', 'notEmpty' => true ] ] ] ],
 				[ 'fields' => [ [ 'name' => 'profil', 'label' => 'Profil', 'type' => 'text' ] ] ],
@@ -809,6 +858,8 @@ function get_the_date( string $format = '', $post = null ): string {
 
 	function reset_state(): void {
 		$GLOBALS['anode_transients']     = [];
+		$GLOBALS['anode_relais']         = [];
+		$GLOBALS['anode_relais_echoue']  = false;
 		$GLOBALS['anode_posts']          = [];
 		$GLOBALS['anode_meta']           = [];
 		$GLOBALS['anode_mails']          = [];
@@ -1135,6 +1186,115 @@ function get_the_date( string $format = '', $post = null ): string {
 
 	/* --- Piège à robots ---------------------------------------------- */
 
+	echo "\nChoix multiple\n";
+
+	/** Un champ `select` déclaré à choix multiple. */
+	function multi( array $sup = [] ): array {
+		return array_merge(
+			[
+				'name'    => 'technos',
+				'label'   => 'Technologies',
+				'type'    => 'select',
+				'multiple' => true,
+				'options' => [ 'WordPress', 'Bricks', 'n8n' ],
+			],
+			$sup
+		);
+	}
+
+	test(
+		'plusieurs valeurs sont retenues, dans l’ordre reçu',
+		function (): void {
+			assert_same( [ 'WordPress', 'n8n' ], sanitize_field( [ 'WordPress', 'n8n' ], multi() ), 'valeurs retenues' );
+		}
+	);
+
+	test(
+		'une seule valeur hors liste fait refuser l’ensemble',
+		function (): void {
+			/*
+			 * Sinon il suffirait d'en glisser une parmi des valeurs valables :
+			 * le champ serait accepté, et la valeur inventée partirait au CRM.
+			 */
+			$refus = sanitize_field( [ 'WordPress', 'Intrus' ], multi() );
+
+			assert_true( $refus instanceof \WP_Error, 'refusé' );
+			assert_contains( 'hors liste', $refus->get_error_message(), 'motif' );
+		}
+	);
+
+	test(
+		'les doublons d’un envoi forgé sont écartés',
+		function (): void {
+			// Ils fausseraient un décompte en aval, sans qu'aucune interface ne
+			// permette de les produire.
+			assert_same( [ 'Bricks' ], sanitize_field( [ 'Bricks', 'Bricks' ], multi() ), 'doublon écarté' );
+		}
+	);
+
+	test(
+		'les valeurs vides ne comptent pas',
+		function (): void {
+			assert_same( [ 'n8n' ], sanitize_field( [ '', 'n8n', '  ' ], multi() ), 'vides écartées' );
+		}
+	);
+
+	test(
+		'un choix multiple vide et obligatoire est refusé',
+		function (): void {
+			$refus = sanitize_field( [], multi( [ 'required' => true ] ) );
+
+			assert_true( $refus instanceof \WP_Error, 'refusé' );
+			assert_same( 'required', $refus->get_error_code(), 'code' );
+		}
+	);
+
+	test(
+		'un choix multiple vide et facultatif rend une liste vide',
+		function (): void {
+			assert_same( [], sanitize_field( [], multi() ), 'liste vide' );
+		}
+	);
+
+	test(
+		'un tableau sur un champ simple reste refusé',
+		function (): void {
+			/*
+			 * La garde ne s'ouvre que sur `multiple` déclaré. Sans cela, un envoi
+			 * forgé passerait un tableau sur n'importe quel champ et traverserait
+			 * les `trim` et `strlen` qui suivent, avec des avertissements PHP.
+			 */
+			$refus = sanitize_field( [ 'a', 'b' ], [ 'name' => 'nom', 'label' => 'Nom', 'type' => 'text' ] );
+
+			assert_true( $refus instanceof \WP_Error, 'refusé' );
+			assert_contains( 'inattendue', $refus->get_error_message(), 'motif' );
+		}
+	);
+
+	test(
+		'une liste de listes est refusée, jamais aplatie',
+		function (): void {
+			// Aplatir inventerait des valeurs que personne n'a choisies.
+			$refus = sanitize_field( [ 'WordPress', [ 'n8n' ] ], multi() );
+
+			assert_true( $refus instanceof \WP_Error, 'refusé' );
+		}
+	);
+
+	test(
+		'« multiple » est servi au navigateur',
+		function (): void {
+			/*
+			 * Sans cette clé dans la liste blanche, le navigateur rend un select
+			 * simple : une seule valeur part, et les autres réponses sont perdues
+			 * sans un mot. Mesuré sur un site en ligne avant correction.
+			 */
+			$public = champ_public( multi() );
+
+			assert_same( true, $public['multiple'] ?? null, 'clé servie' );
+		}
+	);
+
 	echo "\nPiège à robots\n";
 
 	test(
@@ -1145,7 +1305,7 @@ function get_the_date( string $format = '', $post = null ): string {
 			assert_true( $reponse instanceof \WP_REST_Response, 'réponse' );
 			assert_same( true, $reponse->get_data()['ok'], 'succès annoncé' );
 			// Le rejet est silencieux : un robot informé s'adapterait.
-			assert_same( 0, count( $GLOBALS['anode_posts'] ), 'aucune demande enregistrée' );
+			assert_same( 0, relais_partis(), 'aucun relais parti' );
 			assert_same( 0, count( $GLOBALS['anode_mails'] ), 'aucune notification' );
 		}
 	);
@@ -1156,7 +1316,7 @@ function get_the_date( string $format = '', $post = null ): string {
 			$reponse = submit( payload( [ HONEYPOT => '' ] ) );
 
 			assert_true( $reponse instanceof \WP_REST_Response, 'réponse' );
-			assert_same( 1, count( $GLOBALS['anode_posts'] ), 'demande enregistrée' );
+			assert_same( 1, relais_partis(), 'demande relayée' );
 		}
 	);
 
@@ -1202,15 +1362,23 @@ function get_the_date( string $format = '', $post = null ): string {
 	echo "\nChamps conditionnels — réception\n";
 
 	/**
-	 * Valeurs retenues de la dernière demande enregistrée.
+	 * Valeurs parties dans le dernier relais.
 	 *
-	 * Le dernier identifiant, et non le premier : plusieurs envois se suivent dans
-	 * un même test, et un envoi refusé n'en consomme aucun.
+	 * Le dernier, et non le premier : plusieurs envois se suivent dans un même
+	 * test, et un envoi refusé n'en déclenche aucun.
+	 *
+	 * Ce sont les seules valeurs observables : rien n'est enregistré, la seule
+	 * trace d'une demande acceptée est ce qui est parti vers le webhook.
 	 */
 	function valeurs_retenues(): array {
-		$dernier = array_key_last( $GLOBALS['anode_posts'] );
+		$dernier = end( $GLOBALS['anode_relais'] );
 
-		return (array) ( $GLOBALS['anode_meta'][ $dernier ]['_anode_values'] ?? [] );
+		return (array) ( $dernier['body']['fields'] ?? [] );
+	}
+
+	/** Nombre de relais partis depuis le début du test. */
+	function relais_partis(): int {
+		return count( $GLOBALS['anode_relais'] );
 	}
 
 	test(
@@ -1459,30 +1627,7 @@ function get_the_date( string $format = '', $post = null ): string {
 
 	echo "\nAdresse de réponse\n";
 
-	test(
-		'le Reply‑To vient du type du champ, non de son nom',
-		function (): void {
-			// Le champ s'appelle « courriel » : chercher la clé « email » ne
-			// trouvait rien, et le message répondait au site.
-			submit( payload() );
 
-			assert_same( 1, count( $GLOBALS['anode_mails'] ), 'notification envoyée' );
-			assert_same(
-				[ 'Reply-To: jean@exemple.fr' ],
-				$GLOBALS['anode_mails'][0]['headers'],
-				'en-tête de réponse'
-			);
-		}
-	);
-
-	test(
-		'sans champ de type email, aucun Reply‑To n’est forgé',
-		function (): void {
-			submit( [ 'tel' => '0549000000' ], 'rappel' );
-
-			assert_same( [], $GLOBALS['anode_mails'][0]['headers'], 'aucun en-tête' );
-		}
-	);
 
 	test(
 		'le premier champ de type email l’emporte',
@@ -1513,77 +1658,6 @@ function get_the_date( string $format = '', $post = null ): string {
 	);
 
 	/* --- Notification ------------------------------------------------ */
-
-	echo "\nNotification\n";
-
-	test(
-		'la notification porte un lien d’administration, même sans utilisateur connecté',
-		function (): void {
-			// `get_edit_post_link` rendait null faute de capacité `edit_post` :
-			// le lien était vide dans tous les envois publics, c'est-à-dire tous.
-			submit( payload() );
-
-			$corps = $GLOBALS['anode_mails'][0]['message'];
-
-			assert_contains( 'wp-admin/post.php?post=100&action=edit', $corps, 'lien' );
-
-			// Et la ligne porte bien quelque chose : c'est une chaîne vide que
-			// produisait `sprintf` sur le `null` de `get_edit_post_link`.
-			assert_true( (bool) preg_match( '/administration : \S+/u', $corps ), 'ligne non vide' );
-		}
-	);
-
-	test(
-		'la notification est adressée au destinataire de la définition',
-		function (): void {
-			submit( payload() );
-
-			assert_same( 'contact@exemple.fr', $GLOBALS['anode_mails'][0]['to'], 'destinataire' );
-			assert_contains( 'Nous contacter', $GLOBALS['anode_mails'][0]['subject'], 'objet' );
-		}
-	);
-
-	test(
-		'un envoi qui échoue est journalisé et marqué sur la demande',
-		function (): void {
-			$GLOBALS['anode_mail_ok'] = false;
-
-			submit( payload() );
-
-			assert_contains(
-				'notification non envoyée',
-				implode( "\n", $GLOBALS['anode_logs'] ),
-				'journal'
-			);
-			assert_same( 'echec', $GLOBALS['anode_meta'][100]['_anode_notification'] ?? '', 'marque sur la fiche' );
-		}
-	);
-
-	/* --- Preuve de consentement -------------------------------------- */
-
-	echo "\nPreuve de consentement\n";
-
-	test(
-		'la preuve nomme le formulaire, et non le champ deux fois',
-		function (): void {
-			submit( payload() );
-
-			$preuve = $GLOBALS['anode_meta'][100]['_anode_consentement'] ?? [];
-
-			assert_same( 'rgpd', $preuve['champ'] ?? '', 'champ' );
-			assert_same( 'contact', $preuve['source'] ?? '', 'formulaire d’origine' );
-			assert_contains( '/confidentialite/', $preuve['texte'] ?? '', 'texte affiché conservé' );
-		}
-	);
-
-	test(
-		'aucune preuve sans case de consentement obligatoire',
-		function (): void {
-			assert_same( [], consent_proof( 'rappel', definition( 'rappel' ) ?? [], [ 'tel' => '0549000000' ] ), 'aucune' );
-		}
-	);
-
-	/* --- Route publique ---------------------------------------------- */
 
 	echo "\nRoute publique\n";
 
@@ -1685,56 +1759,6 @@ function get_the_date( string $format = '', $post = null ): string {
 	);
 
 	/* --- Purge ------------------------------------------------------- */
-
-	echo "\nPurge\n";
-
-	test(
-		'la purge examine les demandes les plus anciennes',
-		function (): void {
-			/*
-			 * Deux cent cinquante demandes, dont les cinquante plus anciennes ont
-			 * dépassé les 365 jours de la définition. Avec le tri décroissant par
-			 * défaut, le lot de 200 ne contenait que des demandes fraîches et la
-			 * purge n'effaçait rien : ce test échoue si le tri revient.
-			 */
-			for ( $id = 1; $id <= 250; $id++ ) {
-				$GLOBALS['anode_times'][ $id ]        = $id <= 50
-					? time() - ( 400 * DAY_IN_SECONDS )
-					: time() - ( 10 * DAY_IN_SECONDS );
-				$GLOBALS['anode_meta'][ $id ]['_anode_form'] = 'contact';
-			}
-
-			assert_same( 50, purge(), 'demandes effacées' );
-			assert_same( 'ASC', $GLOBALS['anode_get_posts_args']['order'], 'sens du tri' );
-			assert_same( 'date', $GLOBALS['anode_get_posts_args']['orderby'], 'critère du tri' );
-		}
-	);
-
-	test(
-		'la suppression est forcée, jamais mise à la corbeille',
-		function (): void {
-			$GLOBALS['anode_times'][1]                 = time() - ( 400 * DAY_IN_SECONDS );
-			$GLOBALS['anode_meta'][1]['_anode_form']   = 'contact';
-
-			purge();
-
-			assert_same( [ [ 'id' => 1, 'force' => true ] ], $GLOBALS['anode_deleted'], 'suppression forcée' );
-			assert_same( 1, $GLOBALS['anode_options']['anode_forms_derniere_purge']['effacees'], 'trace du nombre' );
-		}
-	);
-
-	test(
-		'une demande dans sa durée de conservation reste',
-		function (): void {
-			$GLOBALS['anode_times'][1]               = time() - ( 10 * DAY_IN_SECONDS );
-			$GLOBALS['anode_meta'][1]['_anode_form'] = 'contact';
-
-			assert_same( 0, purge(), 'rien effacé' );
-			assert_true( ! isset( $GLOBALS['anode_options']['anode_forms_derniere_purge'] ), 'aucune trace inutile' );
-		}
-	);
-
-	/* --- Lecture de la définition ------------------------------------ */
 
 	echo "\nLecture de la définition\n";
 
@@ -1938,13 +1962,17 @@ function get_the_date( string $format = '', $post = null ): string {
 	echo "\nRepli sans JavaScript — réception du POST\n";
 
 	test(
-		'un envoi valide est enregistré, notifié, puis redirigé',
+		'un envoi valide est relayé, puis redirigé',
 		function (): void {
 			$cible = poster( poste_valide() );
 
-			assert_same( 1, count( $GLOBALS['anode_posts'] ), 'demande enregistrée' );
-			assert_same( 1, count( $GLOBALS['anode_mails'] ), 'notification envoyée' );
-			assert_same( 'contact@exemple.fr', $GLOBALS['anode_mails'][0]['to'], 'même destinataire que l’API' );
+			assert_same( 1, relais_partis(), 'demande relayée' );
+			assert_same( 0, count( $GLOBALS['anode_posts'] ), 'rien enregistré' );
+
+			$parti = end( $GLOBALS['anode_relais'] );
+
+			assert_same( 'https://relais.exemple.test/contact', $parti['url'], 'adresse du relais' );
+			assert_same( 'contact', $parti['body']['form'] ?? '', 'nom du formulaire' );
 
 			// POST-redirect-GET : sans redirection, un rafraîchissement renverrait
 			// la demande et le site en recevrait deux.
@@ -2034,7 +2062,7 @@ function get_the_date( string $format = '', $post = null ): string {
 			reset_state();
 			poster( array_merge( poste_valide(), [ '_wp_http_referer' => '/contact/' ] ) );
 
-			assert_same( 1, count( $GLOBALS['anode_posts'] ), 'champs techniques écartés' );
+			assert_same( 1, relais_partis(), 'champs techniques écartés' );
 		}
 	);
 
@@ -2092,7 +2120,7 @@ function get_the_date( string $format = '', $post = null ): string {
 			$_POST['_anode_nonce'] = 'nonce-' . action_nonce( 'contact' ) . '-1';
 
 			assert_contains( 'anode-recu=', intercepter_envoi(), 'renvoi accepté' );
-			assert_same( 1, count( $GLOBALS['anode_posts'] ), 'demande enfin enregistrée' );
+			assert_same( 1, relais_partis(), 'demande enfin relayée' );
 		}
 	);
 
@@ -2153,48 +2181,40 @@ function get_the_date( string $format = '', $post = null ): string {
 	echo "\nPièces jointes\n";
 
 	test(
-		'une pièce jointe conforme est rangée hors des chemins devinables, et rattachée à la demande',
+		'une pièce jointe part dans le relais, et ne reste pas sur le disque',
 		function (): void {
 			$reponse = envoyer( candidat(), [ 'fichier_cv' => piece( 'CV Dupont 2026.pdf' ) ] );
 
 			assert_true( $reponse instanceof \WP_REST_Response, 'envoi accepté' );
 
-			$ranges = fichiers_ranges();
-			$fichier = current(
-				array_filter( $ranges, static fn ( string $chemin ): bool => str_ends_with( $chemin, '.pdf' ) )
-			);
+			$parti = end( $GLOBALS['anode_relais'] );
+			$pieces = $parti['body']['files'] ?? [];
 
-			assert_true( false !== $fichier, 'fichier écrit sur le disque' );
-			assert_contains( '/anode-formulaires/', (string) $fichier, 'rangé à l’écart des médias' );
+			assert_same( 1, count( $pieces ), 'une pièce dans le relais' );
+			assert_same( 'cv', $pieces[0]['field'], 'champ d’origine' );
 
 			/*
-			 * Le nom du client ne devient jamais un nom de fichier : deux candidats
-			 * nommant leur CV pareil se marcheraient dessus, et « cv-dupont.pdf » se
-			 * devine — là où le nôtre tient de seize caractères tirés au sort.
+			 * Le nom rendu est celui saisi par la personne, pas celui du disque :
+			 * le second porte seize caractères tirés au sort, posés pour qu'on ne
+			 * puisse pas deviner l'adresse d'un fichier pendant sa courte vie.
 			 */
-			assert_true( ! str_contains( strtolower( (string) $fichier ), 'dupont' ), 'nom d’origine écarté' );
-			assert_true( (bool) preg_match( '#/cv-[A-Za-z0-9]{16}\.pdf$#', (string) $fichier ), 'nom tiré au sort' );
+			// Assaini par `sanitize_file_name` : les espaces deviennent des tirets.
+			// C'est le nom lisible qu'attend le CRM, pas celui du disque.
+			assert_same( 'CV-Dupont-2026.pdf', $pieces[0]['name'], 'nom d’origine transmis' );
+			assert_same( 'application/pdf', $pieces[0]['mime_type'], 'type transmis' );
 
-			// Le dossier refuse d'être servi : sans cette garde, l'adresse du fichier
-			// suffirait à lire la candidature de n'importe qui.
-			$garde = dirname( (string) $fichier, 3 ) . '/.htaccess';
+			// Le contenu voyage, entier : c'est le seul exemplaire qui subsistera.
+			assert_same( PDF, base64_decode( $pieces[0]['content'], true ), 'contenu transmis' );
 
-			assert_true( file_exists( $garde ), 'garde Apache posée' );
-			assert_contains( 'Require all denied', (string) file_get_contents( $garde ), 'refus explicite' );
-
-			$fichiers = $GLOBALS['anode_meta'][100]['_anode_fichiers'] ?? [];
-
-			assert_true( isset( $fichiers['cv']['id'] ), 'pièce jointe rattachée à la demande' );
-			// Le nom d'origine est conservé pour l'affichage, mais assaini : c'est du
-			// texte que l'administration rendra, pas un chemin.
-			assert_same( 'CV-Dupont-2026.pdf', $fichiers['cv']['nom'], 'nom d’origine conservé pour l’affichage' );
-			// Le chemin sur le disque ne va pas en base : il décrirait l'arborescence
-			// du serveur dans le moindre export.
-			assert_true( ! isset( $fichiers['cv']['chemin'] ), 'chemin absent de la méta' );
-
-			assert_contains( 'CV-Dupont-2026.pdf', $GLOBALS['anode_meta'][100]['_anode_values']['cv'] ?? '', 'réponse lisible' );
-			assert_same( 100, (int) ( $GLOBALS['anode_meta'][ $fichiers['cv']['id'] ]['_anode_fichier'] ?? 0 ), 'laissez-passer posé' );
-			assert_same( false, $GLOBALS['anode_upload_options']['test_form'] ?? null, 'test_form désactivé' );
+			/*
+			 * Et le disque est vide. C'est le point qui compte : le site ne garde
+			 * rien, pas même le temps qu'on vienne chercher. Un fichier laissé là
+			 * serait exactement la copie qu'on refuse de conserver — celle dont
+			 * personne ne se souviendrait pour l'effacer.
+			 */
+			foreach ( fichiers_ranges() as $chemin ) {
+				assert_true( ! file_exists( $chemin ), "fichier effacé : {$chemin}" );
+			}
 		}
 	);
 
@@ -2347,76 +2367,9 @@ function get_the_date( string $format = '', $post = null ): string {
 		}
 	);
 
-	test(
-		'la notification annonce la pièce jointe et son lien, sans la joindre',
-		function (): void {
-			envoyer( candidat(), [ 'fichier_cv' => piece( 'CV.pdf' ) ] );
 
-			$corps = $GLOBALS['anode_mails'][0]['message'];
-			$id    = (int) ( $GLOBALS['anode_meta'][100]['_anode_fichiers']['cv']['id'] ?? 0 );
 
-			assert_contains( 'Pièce jointe — Votre CV : CV.pdf', $corps, 'pièce annoncée' );
-			assert_contains( 'admin-post.php?action=anode-formulaire-fichier&fichier=' . $id, $corps, 'lien de téléchargement' );
 
-			// Le fichier ne voyage pas dans le message : il y dormirait hors de toute
-			// durée de conservation, dans autant de boîtes qu'il y a de destinataires.
-			assert_true( ! str_contains( $corps, '%PDF' ), 'contenu du fichier absent du message' );
-			assert_same( [ 'Reply-To: jean@exemple.fr' ], $GLOBALS['anode_mails'][0]['headers'], 'adresse de réponse intacte' );
-		}
-	);
-
-	test(
-		'l’effacement RGPD emporte la pièce jointe du disque',
-		function (): void {
-			envoyer( candidat( [ 'courriel' => 'jean@exemple.fr' ] ), [ 'fichier_cv' => piece( 'cv.pdf' ) ] );
-
-			$fichier = $GLOBALS['anode_attaches'][ $GLOBALS['anode_meta'][100]['_anode_fichiers']['cv']['id'] ] ?? '';
-
-			assert_true( file_exists( $fichier ), 'fichier présent avant effacement' );
-
-			// `demandes_de()` apparie sur les champs de type email ; la demande
-			// enregistrée porte l'adresse cherchée.
-			$GLOBALS['anode_times'][100] = time();
-
-			$resultat = effacer_donnees( 'jean@exemple.fr' );
-
-			assert_same( true, $resultat['items_removed'], 'demande effacée' );
-			assert_true( ! file_exists( $fichier ), 'fichier effacé du disque' );
-			assert_same( 1, count( $GLOBALS['anode_attachements_supprimes'] ), 'pièce jointe supprimée' );
-		}
-	);
-
-	test(
-		'la purge à échéance emporte elle aussi la pièce jointe',
-		function (): void {
-			envoyer( candidat(), [ 'fichier_cv' => piece( 'cv.pdf' ) ] );
-
-			$fichier = $GLOBALS['anode_attaches'][ $GLOBALS['anode_meta'][100]['_anode_fichiers']['cv']['id'] ] ?? '';
-
-			// La demande a dépassé les trois ans de conservation par défaut.
-			$GLOBALS['anode_times'][100]               = time() - ( 1200 * DAY_IN_SECONDS );
-			$GLOBALS['anode_meta'][100]['_anode_form'] = 'candidature';
-
-			assert_same( 1, purge(), 'demande purgée' );
-			assert_true( ! file_exists( $fichier ), 'fichier effacé du disque' );
-		}
-	);
-
-	test(
-		'l’export RGPD nomme la pièce jointe détenue',
-		function (): void {
-			envoyer( candidat(), [ 'fichier_cv' => piece( 'CV.pdf' ) ] );
-
-			$GLOBALS['anode_times'][100] = time();
-
-			$export = exporter_donnees( 'jean@exemple.fr' );
-			$noms   = array_column( $export['data'][0]['data'] ?? [], 'value', 'name' );
-
-			assert_true( isset( $noms['cv (pièce jointe)'] ), 'pièce jointe inventoriée' );
-			assert_contains( 'CV.pdf', $noms['cv (pièce jointe)'], 'nom du fichier' );
-			assert_contains( 'admin-post.php', $noms['cv (pièce jointe)'], 'lien de récupération' );
-		}
-	);
 
 	test(
 		'la route publique sert les limites appliquées, et aucun plafond de caractères',
