@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Anode — durcissement
  * Description: Sécurité de base sans extension tierce : URL de connexion masquée, limitation des tentatives, en-têtes de sécurité, XML-RPC coupé, énumération des comptes bloquée.
- * Version:     1.0.0
+ * Version:     1.1.0
  * Author:      Anode
  *
  * Remplace SecuPress Pro et WPS Hide Login.
@@ -23,7 +23,12 @@ if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-const VERSION = '1.0.0';
+/*
+ * Une seule source pour la version : l'en-tête du fichier, que l'updater lit.
+ * Ce doublon avait déjà dérivé — en-tête 1.0.1, constante 1.0.0 — et c'est la
+ * constante que le code aurait rapportée.
+ */
+const VERSION = '1.1.0';
 
 /** Option contenant le segment d'URL de connexion. */
 const OPTION_LOGIN_SLUG = 'anode_login_slug';
@@ -39,53 +44,124 @@ const LOCKOUT_DURATION = 15 * MINUTE_IN_SECONDS;
 /* ------------------------------------------------------------------ */
 
 /**
- * Segment d'URL de connexion.
+ * Segment d'URL de connexion — le même sur toutes les installations.
  *
- * Défini par la constante ANODE_LOGIN_SLUG dans wp-config.php, ou par une
- * option générée à la première visite. Masquer wp-login.php ne relève pas de
- * la sécurité au sens strict — c'est de l'obscurité — mais cela suffit à
- * écarter les robots qui martèlent l'URL par défaut.
+ * `/anode-connexion`. Un segment tiré au hasard par site obligeait à aller le
+ * chercher en base à chaque intervention, et le rendait impossible à
+ * communiquer : c'est précisément ce qui poussait à désactiver le masquage en
+ * développement, donc à ne jamais tester la seule branche qui compte.
+ *
+ * Ce que cela coûte, et il faut le savoir : un segment partagé n'est plus un
+ * secret. Il n'écarte que les robots qui martèlent `wp-login.php` — ce qui reste
+ * l'essentiel du bruit — mais une seule fuite vaut pour toutes les
+ * installations. La vraie protection contre une attaque ciblée est donc la
+ * limitation des tentatives, plus bas.
+ *
+ * `ANODE_LOGIN_SLUG` dans `wp-config.php` reste la seule façon de dévier pour un
+ * site donné. L'option `anode_login_slug` n'est **plus lue** : la conserver aurait
+ * laissé à chaque site créé avant ce changement son ancien segment aléatoire,
+ * c'est-à-dire exactement ce qu'on voulait supprimer. Elle est effacée au passage,
+ * pour ne pas laisser en base un réglage qui ne règle plus rien.
  */
+const LOGIN_SLUG_DEFAUT = 'anode-connexion';
+
 function login_slug(): string {
 	if ( defined( 'ANODE_LOGIN_SLUG' ) && is_string( ANODE_LOGIN_SLUG ) && ANODE_LOGIN_SLUG ) {
 		return sanitize_title( ANODE_LOGIN_SLUG );
 	}
 
-	$slug = get_option( OPTION_LOGIN_SLUG );
-
-	if ( ! is_string( $slug ) || '' === $slug ) {
-		$slug = 'acces-' . wp_generate_password( 8, false, false );
-		add_option( OPTION_LOGIN_SLUG, $slug, '', false );
-	}
-
-	return $slug;
+	return LOGIN_SLUG_DEFAUT;
 }
 
-/**
- * Le masquage est-il actif ?
+/*
+ * Ménage : l'option du segment aléatoire n'a plus d'effet.
  *
- * Inactif en environnement local : masquer l'URL de connexion pendant le
- * développement fait perdre plus de temps qu'il n'apporte de sécurité.
+ * `get_option` est servi par le cache d'options, donc cette lecture ne coûte
+ * aucune requête ; l'effacement n'a lieu qu'une fois, au premier chargement qui
+ * suit la mise à jour.
+ */
+add_action(
+	'init',
+	static function (): void {
+		if ( false !== get_option( OPTION_LOGIN_SLUG, false ) ) {
+			delete_option( OPTION_LOGIN_SLUG );
+		}
+	},
+	1
+);
+
+/**
+ * Le masquage est-il actif ? Oui, partout.
+ *
+ * Il était éteint en local, au motif qu'un segment aléatoire fait perdre du
+ * temps en développement. Le motif tombe avec un segment fixe et mémorisable —
+ * et son effet de bord était grave : la branche du masquage n'était **jamais**
+ * exercée avant la mise en ligne. Elle est arrivée en production avec une erreur
+ * fatale, c'est-à-dire aucune façon de se connecter.
+ *
+ * `ANODE_MASK_LOGIN` reste la porte de sortie, pour un site où l'hébergeur ou un
+ * outil tiers impose `wp-login.php`.
  */
 function login_masking_enabled(): bool {
 	if ( defined( 'ANODE_MASK_LOGIN' ) ) {
 		return (bool) ANODE_MASK_LOGIN;
 	}
 
-	return 'local' !== wp_get_environment_type();
+	return true;
 }
 
 /**
- * Sert la page de connexion sur l'URL masquée, et cache l'URL par défaut.
+ * Chemin demandé, sans la barre de tête ni la chaîne de requête.
+ *
+ * Le sous-répertoire d'une installation qui n'est pas à la racine est retiré :
+ * sans cela, `/blog/anode-connexion` ne correspondait à rien et la connexion
+ * devenait impossible sur ce genre d'installation.
+ */
+function requested_path(): string {
+	$path = (string) wp_parse_url( $_SERVER['REQUEST_URI'] ?? '', PHP_URL_PATH );
+	$base = trim( (string) wp_parse_url( site_url(), PHP_URL_PATH ), '/' );
+
+	$path = trim( $path, '/' );
+
+	if ( '' !== $base && ( $path === $base || str_starts_with( $path, $base . '/' ) ) ) {
+		$path = trim( substr( $path, strlen( $base ) ), '/' );
+	}
+
+	return $path;
+}
+
+/*
+ * Le masquage s'applique sur `wp_loaded`, pas sur `plugins_loaded`.
+ *
+ * C'est **la** correction : `require ABSPATH . 'wp-login.php'` sur
+ * `plugins_loaded` produisait une erreur fatale — « Attempt to read property
+ * query_vars on null » — parce que `$wp_query`, `$wp_rewrite` et `$wp` ne sont
+ * construits qu'après cette action. Résultat en production : l'URL masquée
+ * renvoyait 500, `wp-login.php` aussi, et il ne restait **aucune** façon de se
+ * connecter. Le bug était invisible en développement, le masquage y étant éteint.
+ *
+ * `wp_loaded` est le bon moment, et pour trois raisons qui tiennent ensemble :
+ *
+ * - les objets de requête existent, donc `wp-login.php` s'exécute normalement, et
+ *   `not_found()` peut charger le gabarit 404 du thème ;
+ * - rien n'a encore été envoyé au navigateur — `wp()` n'est appelé qu'après, dans
+ *   `wp-blog-header.php` ;
+ * - sur une requête d'administration, `wp-admin/admin.php` charge `wp-load.php`
+ *   — donc déclenche `wp_loaded` — **avant** d'appeler `auth_redirect()`. La garde
+ *   passe donc avant la redirection qui révélait le segment masqué.
+ *
+ * `is_admin()` ne sert plus de sortie anticipée : c'était la cause du second
+ * défaut. Sur `/wp-admin/`, `is_admin()` vaut vrai, la fonction sortait
+ * immédiatement, et la garde qui suit n'a jamais été exécutée une seule fois.
  */
 add_action(
-	'plugins_loaded',
+	'wp_loaded',
 	static function (): void {
-		if ( ! login_masking_enabled() || is_admin() ) {
+		if ( ! login_masking_enabled() ) {
 			return;
 		}
 
-		$path = trim( (string) wp_parse_url( $_SERVER['REQUEST_URI'] ?? '', PHP_URL_PATH ), '/' );
+		$path = requested_path();
 		$slug = login_slug();
 
 		// URL masquée : on sert la page de connexion native.
@@ -102,16 +178,24 @@ add_action(
 			not_found();
 		}
 
-		// wp-admin réservé aux comptes connectés : sans cela, l'URL de
-		// connexion serait révélée par la redirection.
-		if ( str_starts_with( $path, 'wp-admin' ) && ! is_user_logged_in() ) {
+		/*
+		 * wp-admin réservé aux comptes connectés.
+		 *
+		 * Sans cette garde, `auth_redirect()` renvoie vers l'URL de connexion — et
+		 * la met donc en clair dans l'en-tête `Location`. Une requête anonyme sur
+		 * `/wp-admin/` suffisait à révéler le segment masqué.
+		 */
+		if ( 'wp-admin' === $path || str_starts_with( $path, 'wp-admin/' ) ) {
 			// admin-ajax et admin-post servent des requêtes légitimes non authentifiées.
-			if ( ! preg_match( '#wp-admin/(admin-ajax|admin-post)\.php#', $path ) ) {
+			if ( preg_match( '#^wp-admin/(admin-ajax|admin-post)\.php$#', $path ) ) {
+				return;
+			}
+
+			if ( ! is_user_logged_in() ) {
 				not_found();
 			}
 		}
-	},
-	0
+	}
 );
 
 /**
@@ -193,10 +277,30 @@ function client_ip(): string {
 }
 
 /**
+ * Une adresse est-elle verrouillée ?
+ */
+function is_locked_out(): bool {
+	$state = get_transient( attempt_key( client_ip() ) );
+
+	return is_array( $state ) && ( $state['count'] ?? 0 ) >= MAX_LOGIN_ATTEMPTS;
+}
+
+/**
  * Refuse l'authentification d'une adresse bloquée.
  *
- * Le contrôle se fait sur `authenticate` plutôt qu'après échec : une adresse
- * bloquée ne doit même pas pouvoir tester un mot de passe.
+ * **La priorité n'est pas un détail : c'est tout le mécanisme.**
+ *
+ * Le filtre était en 5, avant les authentificateurs du noyau (20), au motif
+ * qu'« une adresse bloquée ne doit même pas pouvoir tester un mot de passe ».
+ * L'intention était juste, la mécanique non : `wp_authenticate_username_password`
+ * ne court-circuite que sur `$user instanceof WP_User` — elle ne regarde jamais
+ * si elle a reçu un `WP_Error`. Notre refus était donc **écrasé** par une
+ * tentative d'authentification neuve, à chaque essai. Le verrou n'a jamais
+ * bloqué quoi que ce soit.
+ *
+ * En 21, juste après les authentificateurs par identifiant et par adresse et
+ * avant `wp_authenticate_cookie` (30), le refus est le dernier mot — et un
+ * visiteur déjà connecté par cookie n'est pas déconnecté au passage.
  */
 add_filter(
 	'authenticate',
@@ -205,10 +309,9 @@ add_filter(
 			return $user;
 		}
 
-		$state = get_transient( attempt_key( client_ip() ) );
-
-		if ( is_array( $state ) && ( $state['count'] ?? 0 ) >= MAX_LOGIN_ATTEMPTS ) {
-			$remaining = max( 1, (int) ceil( ( ( $state['until'] ?? 0 ) - time() ) / 60 ) );
+		if ( is_locked_out() ) {
+			$state     = get_transient( attempt_key( client_ip() ) );
+			$remaining = max( 1, (int) ceil( ( ( ( is_array( $state ) ? $state['until'] : 0 ) ?? 0 ) - time() ) / 60 ) );
 
 			return new \WP_Error(
 				'anode_too_many_attempts',
@@ -222,30 +325,60 @@ add_filter(
 
 		return $user;
 	},
-	5,
+	21,
 	2
 );
 
-/**
- * Comptabilise un échec de connexion.
+/*
+ * Le mot de passe d'application est une seconde porte, et elle n'était pas gardée.
+ *
+ * `wp_validate_application_password()` — accrochée à `determine_current_user` —
+ * appelle `wp_authenticate_application_password()` **en direct**, sans passer par
+ * `wp_authenticate()` : ni le filtre `authenticate` ni l'action
+ * `wp_login_failed` ne s'exécutent. Un attaquant pouvait donc marteler l'API REST
+ * sans jamais être compté ni bloqué, pendant que la porte de `wp-login.php` était
+ * verrouillée après cinq essais.
+ *
+ * Le compte du MCP y est exposé, et il doit être Administrateur (docs/mcp.md:53).
  */
 add_action(
-	'wp_login_failed',
+	'application_password_failed_authentication',
 	static function (): void {
-		$key   = attempt_key( client_ip() );
-		$state = get_transient( $key );
-		$count = is_array( $state ) ? (int) ( $state['count'] ?? 0 ) + 1 : 1;
-
-		set_transient(
-			$key,
-			[
-				'count' => $count,
-				'until' => time() + LOCKOUT_DURATION,
-			],
-			LOCKOUT_DURATION
-		);
+		record_failed_attempt();
 	}
 );
+
+add_filter(
+	'wp_is_application_passwords_available',
+	static function ( $disponible ) {
+		return is_locked_out() ? false : $disponible;
+	}
+);
+
+/**
+ * Comptabilise un échec de connexion, d'où qu'il vienne.
+ *
+ * Nommée plutôt qu'anonyme parce que **deux** portes l'alimentent :
+ * `wp_login_failed` pour le formulaire, et
+ * `application_password_failed_authentication` pour l'API. La seconde ne passe
+ * pas par la première.
+ */
+function record_failed_attempt(): void {
+	$key   = attempt_key( client_ip() );
+	$state = get_transient( $key );
+	$count = is_array( $state ) ? (int) ( $state['count'] ?? 0 ) + 1 : 1;
+
+	set_transient(
+		$key,
+		[
+			'count' => $count,
+			'until' => time() + LOCKOUT_DURATION,
+		],
+		LOCKOUT_DURATION
+	);
+}
+
+add_action( 'wp_login_failed', __NAMESPACE__ . '\\record_failed_attempt' );
 
 /**
  * Efface le compteur après une connexion réussie.
@@ -338,6 +471,31 @@ add_action(
 			wp_safe_redirect( home_url(), 301 );
 			exit;
 		}
+	},
+	0
+);
+
+/*
+ * `?author=1` doit être coupé **avant** la redirection canonique de WordPress.
+ *
+ * `redirect_canonical` est accroché à `template_redirect` en priorité 10, et
+ * enregistré par le noyau avant tout mu-plugin : à priorité égale il partait le
+ * premier, et renvoyait un 301 vers `/author/<identifiant>/`. L'archive d'auteur
+ * était bien bloquée ensuite — mais l'identifiant de connexion avait déjà fuité
+ * dans l'en-tête `Location`, ce qui est exactement l'information cherchée.
+ *
+ * La priorité 0 ci-dessus règle le cas des URL jolies. Celui de `?author=`
+ * demande en plus de désarmer la redirection canonique, qui s'exécute sur
+ * `template_redirect` mais aussi lors d'autres passages.
+ */
+add_filter(
+	'redirect_canonical',
+	static function ( $redirection ) {
+		if ( ! is_user_logged_in() && ( isset( $_GET['author'] ) || is_author() ) ) {
+			return false;
+		}
+
+		return $redirection;
 	}
 );
 

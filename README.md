@@ -10,11 +10,12 @@
 ## À quoi il sert
 
 Il porte les **releases** que `anode-updater` installe sur les sites.
-Chaque release publie deux fichiers :
+Chaque release publie :
 
 ```
 <composant>-<version>.zip           le dossier du composant, tests exclus
 <composant>-<version>.zip.sha256    son empreinte, vérifiée avant installation
+<composant>-<version>.zip.sig       sa signature Ed25519, si le parc est armé
 ```
 
 Les tags sont préfixés par le composant — `anode-cache-v1.2.0` — parce que

@@ -27,7 +27,7 @@ if ( ! defined( 'ABSPATH' ) ) {
  * Explicite plutôt qu'alphabétique : le durcissement doit s'appliquer avant
  * tout le reste, et le pont REST après, pour bénéficier des protections.
  */
-foreach ( [ 'anode-hardening', 'anode-cache', 'anode-seo', 'anode-bridge' ] as $extension ) {
+foreach ( [ 'anode-hardening', 'anode-seo', 'anode-bridge' ] as $extension ) {
 	$file = __DIR__ . "/{$extension}/{$extension}.php";
 
 	if ( is_readable( $file ) ) {
@@ -45,7 +45,7 @@ foreach ( [ 'anode-hardening', 'anode-cache', 'anode-seo', 'anode-bridge' ] as $
  * Le tri alphabétique rend l'ordre déterministe : deux installations du même
  * site chargent les extensions dans le même ordre.
  */
-$loaded = [ 'anode-hardening', 'anode-cache', 'anode-seo', 'anode-bridge' ];
+$loaded = [ 'anode-hardening', 'anode-seo', 'anode-bridge' ];
 
 foreach ( glob( __DIR__ . '/*', GLOB_ONLYDIR ) ?: [] as $directory ) {
 	$name = basename( $directory );
