@@ -23,6 +23,18 @@ final class Source {
 	/** Durée du cache des releases. */
 	private const CACHE = 6 * HOUR_IN_SECONDS;
 
+	/** Releases demandées par page — le maximum accepté par l'API. */
+	private const PAR_PAGE = 100;
+
+	/**
+	 * Nombre de pages au plus.
+	 *
+	 * Un garde-fou, pas une limite de conception : mieux vaut un relevé incomplet
+	 * qu'un site qui tourne indéfiniment sur l'API GitHub à cause d'une réponse
+	 * inattendue.
+	 */
+	private const PAGES_MAX = 10;
+
 	/**
 	 * Releases d'un dépôt, de la plus récente à la plus ancienne.
 	 *
@@ -36,8 +48,41 @@ final class Source {
 			return $cachee;
 		}
 
+		$releases = [];
+
+		// Le dépôt commun porte les releases de tous les composants, rendues par
+		// date décroissante et sans filtre par tag côté API. Passé cent releases,
+		// celles d'un composant peu publié basculent en page deux : le composant
+		// paraît alors n'avoir jamais rien publié, et cesse d'être mis à jour sans
+		// que rien ne le signale. On tourne donc les pages.
+		for ( $page = 1; $page <= self::PAGES_MAX; $page++ ) {
+			$lot = self::lot( $repo, $page );
+
+			if ( is_wp_error( $lot ) ) {
+				return $lot;
+			}
+
+			$releases = array_merge( $releases, $lot );
+
+			// Une page incomplète est la dernière.
+			if ( count( $lot ) < self::PAR_PAGE ) {
+				break;
+			}
+		}
+
+		set_site_transient( $cle, $releases, self::CACHE );
+
+		return $releases;
+	}
+
+	/**
+	 * Une page de releases.
+	 *
+	 * @return array<int, array>|\WP_Error
+	 */
+	private static function lot( string $repo, int $page ) {
 		$reponse = wp_remote_get(
-			sprintf( 'https://api.github.com/repos/%s/releases?per_page=100', $repo ),
+			sprintf( 'https://api.github.com/repos/%s/releases?per_page=%d&page=%d', $repo, self::PAR_PAGE, $page ),
 			self::arguments()
 		);
 
@@ -66,11 +111,11 @@ final class Source {
 
 		$releases = json_decode( wp_remote_retrieve_body( $reponse ), true );
 
-		if ( ! is_array( $releases ) ) {
+		// Une liste, et rien d'autre : la pagination se décide en comptant les
+		// entrées, et un objet d'erreur renvoyé avec un code 200 en fournirait une.
+		if ( ! is_array( $releases ) || ! array_is_list( $releases ) ) {
 			return new \WP_Error( 'anode_updater_reponse', sprintf( 'Réponse illisible de GitHub pour %s.', $repo ) );
 		}
-
-		set_site_transient( $cle, $releases, self::CACHE );
 
 		return $releases;
 	}

@@ -19,10 +19,18 @@ if ( ! defined( 'ABSPATH' ) ) {
 
 final class Planificateur {
 
+	/** Nom du verrou d'installation, au sens de `WP_Upgrader`. */
+	private const VERROU = 'anode_updater';
+
 	public static function demarrer(): void {
 		if ( defined( 'ANODE_UPDATER' ) && ! constant( 'ANODE_UPDATER' ) ) {
 			return;
 		}
+
+		// Avant tout le reste : c'est la réponse qu'attend une installation en
+		// cours ailleurs, et elle doit pouvoir être servie même si la suite de ce
+		// fichier venait à ne rien planifier.
+		Sonde::ecouter();
 
 		add_action( 'init', [ self::class, 'planifier' ] );
 		add_action( Updater::CRON, [ self::class, 'executer' ] );
@@ -55,11 +63,14 @@ final class Planificateur {
 	 * cela — constaté en publiant puis en vérifiant aussitôt.
 	 */
 	public static function verifier_maintenant(): array {
-		foreach ( array_unique( array_column( Updater::composants(), 'repo' ) ) as $repo ) {
-			Source::oublier( (string) $repo );
-		}
-
-		return self::executer();
+		/*
+		 * La purge passe **par** `executer()`, une fois le verrou obtenu.
+		 *
+		 * Purger d'abord, c'était le faire même quand la passe échouait ensuite à
+		 * prendre le verrou : l'appel perdant vidait le cache pour rien, et la
+		 * passe suivante repayait l'intégralité des appels à l'API GitHub.
+		 */
+		return self::executer( true );
 	}
 
 	/**
@@ -67,19 +78,113 @@ final class Planificateur {
 	 *
 	 * @return array État de la vérification, tel qu'enregistré.
 	 */
-	public static function executer(): array {
-		$etat = [
-			'verifie_le' => gmdate( 'c' ),
-			'composants' => [],
-		];
-
-		foreach ( Updater::composants() as $nom => $composant ) {
-			$etat['composants'][ $nom ] = self::examiner( $nom, $composant );
+	public static function executer( bool $oublier_le_cache = false ): array {
+		if ( ! self::verrouiller() ) {
+			// Une vérification court déjà : le cron de quatre heures et un appel
+			// manuel peuvent se croiser, et deux installations du même composant
+			// se marchent dessus — l'une renomme le dossier que l'autre copie.
+			// On rend l'état connu plutôt que d'en fabriquer un second.
+			return (array) get_site_option( Updater::OPTION_ETAT, [] );
 		}
 
-		update_site_option( Updater::OPTION_ETAT, $etat );
+		/*
+		 * On part de l'état connu, on ne le remplace pas.
+		 *
+		 * Écrire à chaque composant protège d'un délai PHP dépassé — sans quoi une
+		 * passe interrompue perdait tout le relevé. Mais repartir d'un tableau vide
+		 * déplaçait le problème : les composants pas encore examinés disparaissaient
+		 * de l'option, donc de l'avis d'administration. Une majeure signalée hier
+		 * cessait de l'être après une passe coupée en cours de route.
+		 */
+		if ( $oublier_le_cache ) {
+			foreach ( array_unique( array_column( Updater::composants(), 'repo' ) ) as $repo ) {
+				Source::oublier( (string) $repo );
+			}
+		}
+
+		$connu = (array) get_site_option( Updater::OPTION_ETAT, [] );
+		$etat  = [
+			'verifie_le' => gmdate( 'c' ),
+			'composants' => is_array( $connu['composants'] ?? null ) ? $connu['composants'] : [],
+		];
+
+		$attendus = Updater::composants();
+
+		// Un composant retiré du manifeste n'a plus à figurer dans l'état : il y
+		// resterait indéfiniment, annoncé comme à jour ou en attente.
+		$etat['composants'] = array_intersect_key( $etat['composants'], $attendus );
+
+		try {
+			foreach ( $attendus as $nom => $composant ) {
+				$etat['composants'][ $nom ] = self::examiner( $nom, $composant );
+
+				update_site_option( Updater::OPTION_ETAT, $etat );
+			}
+
+			/*
+			 * Une liste vide n'écrit rien dans la boucle : sans cette ligne, un
+			 * `composants.json` illisible ou un filtre qui vide la liste **gelait**
+			 * `verifie_le`, et un avis périmé restait affiché sans fin.
+			 */
+			if ( ! $attendus ) {
+				update_site_option( Updater::OPTION_ETAT, $etat );
+			}
+		} finally {
+			self::deverrouiller();
+		}
 
 		return $etat;
+	}
+
+	/**
+	 * Prend le verrou d'installation, ou renvoie false si une autre passe court.
+	 *
+	 * On emprunte celui de WordPress plutôt que d'en écrire un : il repose sur un
+	 * `INSERT IGNORE` dans une colonne unique, donc atomique, là où « lire un
+	 * transient puis l'écrire » laisse passer deux processus partis dans la même
+	 * seconde. Il s'auto-libère aussi : un PHP tué en pleine copie ne condamne pas
+	 * la vérification du lendemain.
+	 */
+	private static function verrouiller(): bool {
+		global $wpdb;
+
+		$clef    = self::VERROU . '.lock';
+		$expire  = 10 * MINUTE_IN_SECONDS;
+		$ancien  = get_option( $clef );
+
+		// Un verrou périmé — PHP tué en pleine copie — ne condamne pas la passe
+		// suivante.
+		if ( $ancien && ( (int) $ancien + $expire ) < time() ) {
+			delete_option( $clef );
+			$ancien = false;
+		}
+
+		if ( $ancien ) {
+			return false;
+		}
+
+		/*
+		 * `INSERT IGNORE` plutôt que « lire puis écrire » : deux passes parties
+		 * dans la même seconde liraient toutes deux « libre ». La colonne
+		 * `option_name` est unique, donc la seconde insertion échoue — c'est le
+		 * mécanisme exact de `WP_Upgrader::create_lock()`, réécrit ici pour ne pas
+		 * charger `wp-admin/includes/class-wp-upgrader.php` et les dix-huit
+		 * fichiers de sa chaîne à **chaque** passage du cron, y compris sur un
+		 * site en vérification seule, qui n'installe jamais rien.
+		 */
+		$pose = $wpdb->query(
+			$wpdb->prepare(
+				"INSERT IGNORE INTO `{$wpdb->options}` ( option_name, option_value, autoload ) VALUES ( %s, %s, 'off' ) /* LOCK */",
+				$clef,
+				time()
+			)
+		);
+
+		return (bool) $pose;
+	}
+
+	private static function deverrouiller(): void {
+		delete_option( self::VERROU . '.lock' );
 	}
 
 	/**
@@ -140,23 +245,88 @@ final class Planificateur {
 		}
 
 		$resultat = Installateur::installer( $nom, $derniere['release'], $publiee );
+		$sonde    = Installateur::sonde_du_dernier_essai();
 
 		if ( is_wp_error( $resultat ) ) {
+			// Une version retirée par la sonde n'est pas une installation qui a
+			// échoué : elle a eu lieu, puis a été défaite. Le journal doit les
+			// distinguer, sinon on cherche pendant une heure pourquoi le dossier
+			// porte encore l'ancienne version après une « installation ».
+			self::consigner(
+				$nom,
+				[
+					'de'       => $installee,
+					'vers'     => $publiee,
+					'palier'   => $palier,
+					'resultat' => 'anode_updater_sonde' === $resultat->get_error_code() ? 'restauree' : 'echec',
+					'message'  => $resultat->get_error_message(),
+					/*
+					 * Le verdict de la sonde, y compris — et surtout — quand
+					 * l'installation a échoué : c'est là qu'on cherche à savoir si
+					 * le site répondait avant, et ce qu'il répondait après. La
+					 * branche de réussite le consignait, celle-ci l'oubliait.
+					 */
+					'sonde'    => Installateur::sonde_du_dernier_essai()['etat'],
+				]
+			);
+
 			return [
 				'etat'      => 'echec',
 				'installee' => $installee,
 				'publiee'   => $publiee,
 				'palier'    => $palier,
+				'sonde'     => $sonde['etat'],
 				'message'   => $resultat->get_error_message(),
 			];
 		}
+
+		self::consigner(
+			$nom,
+			[
+				'de'       => $installee,
+				'vers'     => $publiee,
+				'palier'   => $palier,
+				'resultat' => 'installee',
+				'sonde'    => $sonde['etat'],
+				'message'  => 'ok' === $sonde['etat'] ? '' : (string) ( $sonde['message'] ?? '' ),
+			]
+		);
 
 		return [
 			'etat'      => 'installee',
 			'installee' => $publiee,
 			'depuis'    => $installee,
 			'palier'    => $palier,
+			'sonde'     => $sonde['etat'],
 		];
+	}
+
+	/**
+	 * Ajoute une ligne au journal des installations.
+	 *
+	 * `OPTION_ETAT` est écrasée à chaque passe : elle dit où l'on en est, jamais
+	 * ce qui s'est passé. Un site qui se met à mal fonctionner un mardi n'avait
+	 * donc rien à consulter pour savoir ce qui avait bougé le lundi.
+	 */
+	private static function consigner( string $nom, array $entree ): void {
+		$journal = (array) get_site_option( Updater::OPTION_JOURNAL, [] );
+		$suite   = Updater::journaliser( $journal, [ 'quand' => gmdate( 'c' ), 'composant' => $nom ] + $entree );
+
+		/*
+		 * Créée hors autoload, et une seule fois.
+		 *
+		 * Une option écrite par `update_option()` sans avoir jamais existé est
+		 * chargée à **chaque** requête du site. Ce journal, lui, ne se lit qu'à la
+		 * demande : cinquante entrées dans `alloptions` seraient un poids payé sur
+		 * chaque page pour un fichier qu'on ouvre trois fois par an.
+		 */
+		if ( ! is_multisite() && false === get_option( Updater::OPTION_JOURNAL, false ) ) {
+			add_option( Updater::OPTION_JOURNAL, $suite, '', false );
+
+			return;
+		}
+
+		update_site_option( Updater::OPTION_JOURNAL, $suite );
 	}
 
 	/**
@@ -177,35 +347,66 @@ final class Planificateur {
 			return $etat;
 		}
 
-		$composants = Updater::composants();
-
-		foreach ( $attente as $nom ) {
-			if ( ! isset( $composants[ $nom ] ) ) {
-				continue;
-			}
-
-			Source::oublier( (string) $composants[ $nom ]['repo'] );
-
-			$releases = Source::releases( (string) $composants[ $nom ]['repo'] );
-
-			if ( is_wp_error( $releases ) ) {
-				continue;
-			}
-
-			$derniere = Updater::derniere_release( $releases, Updater::prefixe_tag( $composants[ $nom ] ) );
-
-			if ( null === $derniere ) {
-				continue;
-			}
-
-			$resultat = Installateur::installer( $nom, $derniere['release'], $derniere['version'] );
-
-			$etat['composants'][ $nom ] = is_wp_error( $resultat )
-				? [ 'etat' => 'echec', 'publiee' => $derniere['version'], 'message' => $resultat->get_error_message() ]
-				: [ 'etat' => 'installee', 'installee' => $derniere['version'] ];
+		// Même verrou que la vérification : cette liste-ci installe des majeures,
+		// et deux passes concurrentes sur le même composant se disputeraient son
+		// dossier.
+		if ( ! self::verrouiller() ) {
+			return $etat;
 		}
 
-		update_site_option( Updater::OPTION_ETAT, $etat );
+		$composants = Updater::composants();
+
+		try {
+			foreach ( $attente as $nom ) {
+				if ( ! isset( $composants[ $nom ] ) ) {
+					continue;
+				}
+
+				Source::oublier( (string) $composants[ $nom ]['repo'] );
+
+				$releases = Source::releases( (string) $composants[ $nom ]['repo'] );
+
+				if ( is_wp_error( $releases ) ) {
+					continue;
+				}
+
+				$derniere = Updater::derniere_release( $releases, Updater::prefixe_tag( $composants[ $nom ] ) );
+
+				if ( null === $derniere ) {
+					continue;
+				}
+
+				$depuis   = Installateur::version_installee( $nom );
+				$resultat = Installateur::installer( $nom, $derniere['release'], $derniere['version'] );
+				$sonde    = Installateur::sonde_du_dernier_essai();
+
+				self::consigner(
+					$nom,
+					[
+						'de'       => $depuis,
+						'vers'     => $derniere['version'],
+						'resultat' => is_wp_error( $resultat )
+							? ( 'anode_updater_sonde' === $resultat->get_error_code() ? 'restauree' : 'echec' )
+							: 'installee',
+						'sonde'    => $sonde['etat'],
+						'message'  => is_wp_error( $resultat )
+							? $resultat->get_error_message()
+							: ( 'ok' === $sonde['etat'] ? '' : (string) ( $sonde['message'] ?? '' ) ),
+					]
+				);
+
+				$etat['composants'][ $nom ] = is_wp_error( $resultat )
+					? [ 'etat' => 'echec', 'publiee' => $derniere['version'], 'sonde' => $sonde['etat'], 'message' => $resultat->get_error_message() ]
+					: [ 'etat' => 'installee', 'installee' => $derniere['version'], 'sonde' => $sonde['etat'] ];
+
+				// Enregistré composant par composant, pour la même raison qu'à la
+				// vérification : une interruption ne doit pas effacer ce qui a été
+				// installé pour de bon.
+				update_site_option( Updater::OPTION_ETAT, $etat );
+			}
+		} finally {
+			self::deverrouiller();
+		}
 
 		return $etat;
 	}

@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Anode — mises à jour
  * Description: Tient à jour les mu-plugins maison depuis leurs dépôts GitHub. Vérifie chaque jour, applique les correctifs et les versions mineures, retient les majeures.
- * Version:     1.0.3
+ * Version:     1.5.0
  * Author:      Anode
  * Requires PHP: 8.1
  *
@@ -20,7 +20,10 @@
  * ne se découvre pas un dimanche.
  *
  * `ANODE_UPDATER_AUTO` force le comportement : `false` pour ne jamais rien
- * appliquer (vérification seule), `'majeure'` pour tout accepter.
+ * appliquer (vérification seule), `'majeure'` pour tout accepter. Les paliers
+ * portent leur nom français : une valeur inconnue — `'patch'`, `'minor'` —
+ * n'applique **rien** et laisse une trace, plutôt que de retomber en silence sur
+ * un réglage que personne n'a demandé.
  *
  * ## Ce qui est vérifié avant d'écrire
  *
@@ -28,14 +31,39 @@
  * client : le contrôle n'est pas une formalité.
  *
  *   1. l'archive vient d'une **release** du dépôt déclaré, jamais d'une branche ;
- *   2. son empreinte SHA-256 correspond à celle publiée, quand elle l'est ;
- *   3. elle contient exactement le dossier attendu, avec son fichier principal ;
- *   4. l'en-tête annonce bien la version de la release ;
- *   5. `Requires PHP` et `Requires at least` sont satisfaits par ce site.
+ *   2. son empreinte SHA-256 correspond à celle publiée — et dès qu'une release
+ *      en publie une, le contrôle ne peut plus être sauté ;
+ *   3. sa **signature Ed25519** est celle de la clé de confiance du site, quand
+ *      ce site en a une ;
+ *   4. elle contient exactement le dossier attendu, avec son fichier principal ;
+ *   5. l'en-tête annonce bien la version de la release ;
+ *   6. `Requires PHP` et `Requires at least` sont satisfaits par ce site.
+ *
+ * Les deux premiers contrôles ne prouvent qu'une chose : l'archive est bien
+ * celle que la release publie. Ils ne disent rien de *qui* a publié la release —
+ * l'archive et son empreinte sortent du même compte GitHub, et un compte
+ * compromis produit les deux. La signature, elle, est faite hors de GitHub, avec
+ * une clé privée qui n'y monte jamais : c'est le seul des contrôles qu'une prise
+ * de contrôle du dépôt ne suffit pas à satisfaire.
  *
  * La version remplacée est conservée dans `mu-plugins/.anode-versions/`, ce qui
  * rend le retour en arrière possible sans accès au dépôt.
  *
+ * ## Ce qui est vérifié après avoir écrit
+ *
+ * Les contrôles ci-dessus portent tous sur l'archive. Aucun ne dit si le
+ * composant *se charge* : une fatale peut venir d'un appel à une fonction
+ * absente, que ni `php -l` ni un en-tête ne voient. Et un mu-plugin ne se
+ * désactive pas — une version qui tombe emporte le site entier, administration
+ * comprise, sans que rien ne la remette en arrière.
+ *
+ * D'où la sonde : le site s'appelle lui-même avant et après la bascule. Un 500
+ * qui n'existait pas avant remet l'ancienne version en place. Ce qu'elle ne sait
+ * pas trancher — site injoignable, protection d'accès — est noté comme tel,
+ * jamais transformé en retour arrière : reculer sur une preuve douteuse
+ * défaisait chaque jour une mise à jour parfaitement saine.
+ *
+
  * ## Dépôt unique ou un dépôt par extension
  *
  * Les deux marchent, et le choix n'engage que la déclaration : un composant
@@ -56,10 +84,26 @@ if ( ! defined( 'ABSPATH' ) ) {
 
 final class Updater {
 
-	public const VERSION = '1.0.3';
+	public const VERSION = '1.5.0';
 
 	/** Où l'on retient le résultat de la dernière vérification. */
 	public const OPTION_ETAT = 'anode_updater_etat';
+
+	/**
+	 * Où l'on retient ce qui a réellement été installé, et quand.
+	 *
+	 * `OPTION_ETAT` est **écrasée** à chaque passe : après deux vérifications,
+	 * plus rien ne dit quand un composant est passé de 1.0.0 à 1.1.0, ni si
+	 * l'installation avait abouti. Un incident qui remonte trois jours plus tard
+	 * n'avait alors aucune trace à interroger.
+	 */
+	public const OPTION_JOURNAL = 'anode_updater_journal';
+
+	/** Entrées gardées au journal — au-delà, les plus anciennes tombent. */
+	public const JOURNAL_MAX = 50;
+
+	/** Longueur retenue d'un message au journal. */
+	public const JOURNAL_MESSAGE_MAX = 300;
 
 	/** Crochet de la vérification quotidienne. */
 	public const CRON = 'anode_updater_verifier';
@@ -109,17 +153,155 @@ final class Updater {
 	 * @return array<string, array{repo: string, chemin?: string}>
 	 */
 	public static function manifeste(): array {
-		$fichier = __DIR__ . '/composants.json';
+		$document = self::document();
 
-		if ( ! is_readable( $fichier ) ) {
-			return [];
+		return is_array( $document['composants'] ?? null ) ? $document['composants'] : [];
+	}
+
+	/**
+	 * Le manifeste, décodé une fois.
+	 *
+	 * @return array<string, mixed>
+	 */
+	private static function document(): array {
+		static $document = null;
+
+		if ( null !== $document ) {
+			return $document;
 		}
 
-		$document = json_decode( (string) file_get_contents( $fichier ), true ); // phpcs:ignore WordPress.WP.AlternativeFunctions
+		$fichier  = __DIR__ . '/composants.json';
+		$document = [];
 
-		return is_array( $document ) && is_array( $document['composants'] ?? null )
-			? $document['composants']
-			: [];
+		if ( is_readable( $fichier ) ) {
+			$lu = json_decode( (string) file_get_contents( $fichier ), true ); // phpcs:ignore WordPress.WP.AlternativeFunctions
+
+			$document = is_array( $lu ) ? $lu : [];
+		}
+
+		return $document;
+	}
+
+	/* -------------------------------------------------------------- */
+	/* Confiance : d'où vient l'archive, et pas seulement ce qu'elle vaut */
+	/* -------------------------------------------------------------- */
+
+	/**
+	 * Clé publique Ed25519 à laquelle ce site fait confiance, en base64.
+	 *
+	 * Deux origines, et l'ordre compte. La constante l'emporte : elle vit dans
+	 * `wp-config.php`, que le canal de mise à jour ne touche jamais — un dépôt
+	 * compromis ne peut donc pas la remplacer. Le manifeste, lui, voyage avec
+	 * l'archive de `anode-updater` : c'est commode, mais c'est aussi ce qui
+	 * rendrait la rotation de clé possible depuis le dépôt, d'où le garde-fou de
+	 * `rotation_refusee()`.
+	 *
+	 * Vide ou absente : aucune signature n'est exigée, et les archives non
+	 * signées restent installables. C'est l'état des sites tant que la clé n'est
+	 * pas posée.
+	 */
+	public static function cle_publique(): ?string {
+		if ( self::cle_epinglee() ) {
+			return trim( (string) constant( 'ANODE_UPDATER_CLE' ) );
+		}
+
+		$document = self::document();
+
+		return is_string( $document['cle_publique'] ?? null ) ? trim( $document['cle_publique'] ) : null;
+	}
+
+	/** La clé est-elle fixée dans `wp-config.php`, hors de portée du dépôt ? */
+	public static function cle_epinglee(): bool {
+		return defined( 'ANODE_UPDATER_CLE' )
+			&& is_string( constant( 'ANODE_UPDATER_CLE' ) )
+			&& '' !== trim( (string) constant( 'ANODE_UPDATER_CLE' ) );
+	}
+
+	/**
+	 * Faut-il refuser une archive faute de signature ?
+	 *
+	 * Sans cette règle, la signature ne protège de rien : il suffirait de
+	 * publier la release **sans** le fichier `.sig` pour retomber sur le
+	 * comportement d'avant. Une clé posée sur un site vaut donc exigence.
+	 *
+	 * @return string|null Motif du refus, ou null.
+	 */
+	public static function refus_signature( ?string $cle, bool $signature_publiee ): ?string {
+		if ( null === $cle || '' === $cle ) {
+			return null;
+		}
+
+		return $signature_publiee
+			? null
+			: 'ce site exige une signature, or la release n’en publie pas (fichier .sig absent)';
+	}
+
+	/**
+	 * Faut-il refuser une archive parce qu'elle change la clé de confiance ?
+	 *
+	 * L'archive de `anode-updater` embarque `composants.json`, donc la clé
+	 * publique : sans ce refus, un dépôt compromis publierait un updater portant
+	 * **sa** clé, signé par elle, et le site l'accepterait — la signature ne
+	 * vaudrait plus que jusqu'à la première mise à jour de l'updater lui-même.
+	 * Changer de clé redevient donc un acte manuel.
+	 *
+	 * Deux cas n'ont rien à refuser : un site dont la clé est épinglée dans
+	 * `wp-config.php` — le manifeste ne décide plus de rien —, et un site qui
+	 * n'en a pas encore, où adopter une clé est précisément le but.
+	 *
+	 * @return string|null Motif du refus, ou null.
+	 */
+	public static function rotation_refusee( ?string $actuelle, ?string $entrante, bool $epinglee ): ?string {
+		if ( $epinglee || null === $actuelle || '' === $actuelle ) {
+			return null;
+		}
+
+		if ( trim( (string) $entrante ) === $actuelle ) {
+			return null;
+		}
+
+		return 'cette version change la clé publique de confiance : à installer à la main, après avoir vérifié d’où vient ce changement';
+	}
+
+	/* -------------------------------------------------------------- */
+	/* Journal                                                         */
+	/* -------------------------------------------------------------- */
+
+	/**
+	 * Ajoute une entrée en tête du journal, et coupe la queue.
+	 *
+	 * Borné, parce qu'une option de site est chargée à chaque requête quand elle
+	 * est en autoload et exportée avec la base dans tous les cas : un journal qui
+	 * grossit sans fin finit par coûter à chaque page.
+	 *
+	 * @param array<int, array<string, mixed>> $journal
+	 * @param array<string, mixed>             $entree
+	 * @return array<int, array<string, mixed>>
+	 */
+	public static function journaliser( array $journal, array $entree, int $max = self::JOURNAL_MAX ): array {
+		$entree['message'] = self::resumer( (string) ( $entree['message'] ?? '' ) );
+
+		if ( '' === $entree['message'] ) {
+			unset( $entree['message'] );
+		}
+
+		array_unshift( $journal, $entree );
+
+		return array_slice( array_values( $journal ), 0, max( 1, $max ) );
+	}
+
+	/**
+	 * Message d'entrée de journal, sur une ligne et de longueur bornée.
+	 *
+	 * Un message d'erreur de WordPress peut porter une sortie serveur entière :
+	 * cinquante entrées de cette taille, et l'option se compte en mégaoctets.
+	 */
+	private static function resumer( string $message ): string {
+		$message = trim( (string) preg_replace( '/\s+/u', ' ', $message ) );
+
+		return mb_strlen( $message ) > self::JOURNAL_MESSAGE_MAX
+			? mb_substr( $message, 0, self::JOURNAL_MESSAGE_MAX - 1 ) . '…'
+			: $message;
 	}
 
 	/* -------------------------------------------------------------- */
@@ -214,18 +396,67 @@ final class Updater {
 	 */
 	public static function auto_autorise( string $palier ): bool {
 		$reglage = defined( 'ANODE_UPDATER_AUTO' ) ? constant( 'ANODE_UPDATER_AUTO' ) : 'mineure';
+		$plafond = self::plafond_auto( $reglage );
 
-		if ( false === $reglage ) {
+		if ( null === $plafond ) {
+			// Un réglage illisible n'est pas un « ne rien appliquer » demandé : il
+			// faut le nommer, sinon le site reste en arrière sans que rien ne le
+			// dise. `false`, lui, est un choix — on ne le commente pas.
+			if ( false !== $reglage ) {
+				self::tracer(
+					sprintf(
+						'ANODE_UPDATER_AUTO vaut %s : ce n’est pas un palier connu (%s). Aucune mise à jour ne sera appliquée seule.',
+						var_export( $reglage, true ),
+						implode( ', ', self::PALIERS )
+					)
+				);
+			}
+
 			return false;
 		}
 
+		return array_search( $palier, self::PALIERS, true ) <= array_search( $plafond, self::PALIERS, true );
+	}
+
+	/**
+	 * Palier maximal appliqué seul, ou null si rien ne doit s'appliquer.
+	 *
+	 * Les paliers sont nommés en français. Un site qui écrit `'patch'` ou
+	 * `'minor'` — les noms anglais, qui viennent naturellement — obtenait
+	 * « mineure » : la valeur inconnue retombait sur le défaut, et une majeure
+	 * refusée passait pour le comportement voulu. On refuse tout, ce qui laisse
+	 * la version en attente et visible dans l'administration.
+	 *
+	 * @param mixed $reglage Valeur de `ANODE_UPDATER_AUTO`, ou le défaut du projet.
+	 */
+	public static function plafond_auto( $reglage ): ?string {
 		if ( true === $reglage ) {
-			return true;
+			return 'majeure';
 		}
 
-		$plafond = is_string( $reglage ) && in_array( $reglage, self::PALIERS, true ) ? $reglage : 'mineure';
+		if ( is_string( $reglage ) && in_array( $reglage, self::PALIERS, true ) ) {
+			return $reglage;
+		}
 
-		return array_search( $palier, self::PALIERS, true ) <= array_search( $plafond, self::PALIERS, true );
+		return null;
+	}
+
+	/**
+	 * Laisse une trace d'un réglage qui ne dit pas ce que son auteur croit.
+	 *
+	 * Une même erreur n'a pas à remplir le journal à chaque composant : autant de
+	 * lignes identiques que de composants suivis, chaque jour.
+	 */
+	private static function tracer( string $message ): void {
+		static $dites = [];
+
+		if ( isset( $dites[ $message ] ) ) {
+			return;
+		}
+
+		$dites[ $message ] = true;
+
+		error_log( 'anode-updater : ' . $message ); // phpcs:ignore WordPress.PHP.DevelopmentFunctions
 	}
 
 	/**
@@ -244,6 +475,7 @@ final class Updater {
 	public static function archive( array $assets, string $nom, string $version ): ?array {
 		$attendu   = sprintf( '%s-%s.zip', $nom, $version );
 		$empreinte = null;
+		$signature = null;
 		$archive   = null;
 
 		foreach ( $assets as $asset ) {
@@ -256,13 +488,17 @@ final class Updater {
 			if ( $fichier === $attendu . '.sha256' && ! empty( $asset['url'] ) ) {
 				$empreinte = $asset;
 			}
+
+			if ( $fichier === $attendu . '.sig' && ! empty( $asset['url'] ) ) {
+				$signature = $asset;
+			}
 		}
 
 		if ( null === $archive ) {
 			return null;
 		}
 
-		return [ 'archive' => $archive, 'empreinte' => $empreinte ];
+		return [ 'archive' => $archive, 'empreinte' => $empreinte, 'signature' => $signature ];
 	}
 
 	/**
@@ -312,6 +548,8 @@ final class Updater {
 
 /* ------------------------------------------------------------------ */
 
+require_once __DIR__ . '/includes/class-signature.php';
+require_once __DIR__ . '/includes/class-sonde.php';
 require_once __DIR__ . '/includes/class-source.php';
 require_once __DIR__ . '/includes/class-installateur.php';
 require_once __DIR__ . '/includes/class-planificateur.php';
