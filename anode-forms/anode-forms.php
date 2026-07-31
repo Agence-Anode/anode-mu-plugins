@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Anode — formulaires
  * Description: Réception, validation et relais des formulaires vers leurs webhooks — le site n'enregistre et ne notifie rien. Versant serveur du moteur assets/js/form-engine.js, en remplacement de l'élément « formulaire » de Bricks.
- * Version:     3.1.0
+ * Version:     3.2.0
  * Author:      Anode
  *
  * Pourquoi ne pas utiliser l'élément de Bricks : un seul écran, une validation
@@ -2576,28 +2576,85 @@ function tracage_recu(): array {
 }
 
 /**
- * Adresses de relais déclarées, retenues et valides.
+ * Motif d'une **référence** de relais : `constante:NOM_DE_CONSTANTE`.
  *
- * `"webhook": "https://…"` pour une, `"webhooks": [ … ]` pour plusieurs. Ni
- * l'une ni l'autre ne sort vers le navigateur : elles ne figurent pas dans la
- * liste blanche de `describe()`. Une URL de scénario n8n ou Make est un point
- * d'entrée ouvert — la connaître suffit à y déverser n'importe quoi.
+ * Trois caractères au moins, soixante-quatre au plus, majuscules, chiffres et
+ * tirets bas — la forme d'une constante de `wp-config.php`. Le motif est étroit
+ * à dessein : une définition qui nommerait `DB_PASSWORD` ne rendrait rien
+ * d'exploitable (la valeur est ensuite jugée comme une URL, donc écartée), mais
+ * autant ne pas laisser une définition désigner n'importe quelle constante.
+ */
+const REFERENCE_RELAIS = '/^constante:([A-Z][A-Z0-9_]{2,63})$/';
+
+/**
+ * Résout une adresse de relais déclarée.
  *
- * Trois refus, et le troisième est celui qu'on oublie :
+ * Une adresse écrite en clair est rendue telle quelle. Une **référence** —
+ * `constante:NIORT_WEBHOOK_CONTACT` — est remplacée par la valeur de la
+ * constante correspondante, et par la chaîne vide si elle n'est pas définie.
  *
- * - **HTTPS seulement.** En clair, la demande traverserait le réseau lisible.
- * - **URL bien formée**, sinon on ne sait pas où l'on écrit.
- * - **Jamais une adresse IP littérale.** Un webhook pointant sur `169.254.169.254`,
- *   `127.0.0.1` ou `10.0.0.5` fait poster le serveur **contre lui-même ou contre
- *   son réseau interne** — c'est la porte d'entrée classique vers les
- *   métadonnées d'un hébergeur cloud. Le nom d'hôte, lui, doit se résoudre.
+ * Pourquoi cette indirection existe, plutôt que l'URL dans le fichier :
  *
- * Cinq au maximum : au-delà, une demande attendrait la ronde de tous les
- * destinataires avant que le visiteur ne voie sa confirmation.
+ * - **Une URL de scénario n8n ou Make est un porteur d'autorisation.** La
+ *   connaître suffit à y déverser n'importe quoi. Versionnée, elle part sur
+ *   GitHub, dans chaque clone, dans chaque sauvegarde du dépôt.
+ * - **Les environnements lisent le même fichier.** Le thème est versionné : la
+ *   préproduction et la production servent la même définition. Une URL écrite
+ *   là fait poster la préproduction dans le CRM réel — des prospects fictifs
+ *   dans les vraies listes, et les automatisations du client déclenchées sur
+ *   des essais.
+ *
+ * Une constante de `wp-config.php` répond aux deux : elle est propre à
+ * l'installation, donc à l'environnement, et elle ne quitte jamais le serveur.
+ * C'est déjà le rangement retenu pour `ANODE_GITHUB_TOKEN` — et pour la même
+ * raison qu'ici : une option en base part avec l'export et se lit depuis
+ * n'importe quelle extension.
+ *
+ * Le fichier versionné garde ce qui doit l'être — **quel** formulaire vise
+ * **quel** scénario —, et perd seulement ce qui ne doit pas y être.
+ */
+function resoudre_relais( string $brute ): string {
+	if ( ! preg_match( REFERENCE_RELAIS, trim( $brute ), $trouve ) ) {
+		return $brute;
+	}
+
+	$valeur = defined( $trouve[1] ) ? constant( $trouve[1] ) : '';
+
+	return is_string( $valeur ) ? $valeur : '';
+}
+
+/**
+ * Les références déclarées dont la constante n'est pas définie ici.
+ *
+ * Sert au journal du serveur et à la sonde de santé : sans elles, un relais
+ * référencé mais non résolu se lit exactement comme un relais absent, alors que
+ * le geste de réparation n'est pas le même — l'un demande d'écrire une ligne
+ * dans `wp-config.php`, l'autre de créer un scénario.
+ *
+ * @return list<string> Noms de constantes, sans le préfixe `constante:`.
+ */
+function references_non_resolues( array $definition ): array {
+	$manquantes = [];
+
+	foreach ( relais_bruts( $definition ) as $brute ) {
+		if ( ! preg_match( REFERENCE_RELAIS, trim( $brute ), $trouve ) ) {
+			continue;
+		}
+
+		if ( '' === resoudre_relais( $brute ) ) {
+			$manquantes[] = $trouve[1];
+		}
+	}
+
+	return array_values( array_unique( $manquantes ) );
+}
+
+/**
+ * Les adresses de relais telles que la définition les écrit, sans jugement.
  *
  * @return list<string>
  */
-function relais_declares( array $definition ): array {
+function relais_bruts( array $definition ): array {
 	$brutes = [];
 
 	if ( isset( $definition['webhook'] ) && is_string( $definition['webhook'] ) ) {
@@ -2610,10 +2667,41 @@ function relais_declares( array $definition ): array {
 		}
 	}
 
+	return $brutes;
+}
+
+/**
+ * Adresses de relais déclarées, résolues, retenues et valides.
+ *
+ * `"webhook": "https://…"` pour une, `"webhooks": [ … ]` pour plusieurs — ou
+ * une référence `constante:NOM`, voir `resoudre_relais()`. Ni l'une ni l'autre
+ * ne sort vers le navigateur : elles ne figurent pas dans la liste blanche de
+ * `describe()`. Une URL de scénario n8n ou Make est un point d'entrée ouvert —
+ * la connaître suffit à y déverser n'importe quoi.
+ *
+ * Trois refus, et le troisième est celui qu'on oublie :
+ *
+ * - **HTTPS seulement.** En clair, la demande traverserait le réseau lisible.
+ * - **URL bien formée**, sinon on ne sait pas où l'on écrit.
+ * - **Jamais une adresse IP littérale.** Un webhook pointant sur `169.254.169.254`,
+ *   `127.0.0.1` ou `10.0.0.5` fait poster le serveur **contre lui-même ou contre
+ *   son réseau interne** — c'est la porte d'entrée classique vers les
+ *   métadonnées d'un hébergeur cloud. Le nom d'hôte, lui, doit se résoudre.
+ *
+ * Les trois s'appliquent **après** résolution : une constante mal renseignée
+ * est jugée comme une adresse écrite à la main, et écartée de la même façon.
+ *
+ * Cinq au maximum : au-delà, une demande attendrait la ronde de tous les
+ * destinataires avant que le visiteur ne voie sa confirmation.
+ *
+ * @return list<string>
+ */
+function relais_declares( array $definition ): array {
+	$brutes   = relais_bruts( $definition );
 	$retenues = [];
 
 	foreach ( array_slice( $brutes, 0, 5 ) as $url ) {
-		$url = trim( $url );
+		$url = trim( resoudre_relais( $url ) );
 
 		if ( '' === $url || 0 !== stripos( $url, 'https://' ) || ! wp_http_validate_url( $url ) ) {
 			continue;
@@ -2675,7 +2763,28 @@ function relayer( string $name, array $definition, array $values, string $page, 
 		 * subsiste dans le motif, qui part au journal du serveur : elle change ce
 		 * qu'il faut réparer, pas ce qu'il faut répondre.
 		 */
-		$declare = isset( $definition['webhook'] ) || isset( $definition['webhooks'] );
+		$declare    = isset( $definition['webhook'] ) || isset( $definition['webhooks'] );
+		$manquantes = references_non_resolues( $definition );
+
+		if ( $manquantes ) {
+			/*
+			 * Le cas le plus fréquent d'un site fraîchement mis en ligne, et le
+			 * seul dont le motif dise le geste exact : la définition nomme bien
+			 * sa destination, mais l'installation ne la connaît pas.
+			 *
+			 * Sans cette branche, le journal disait « aucune adresse valable » —
+			 * ce qui envoyait relire un fichier correct au lieu d'ouvrir
+			 * `wp-config.php`.
+			 */
+			return new \WP_Error(
+				'anode_form_webhook',
+				sprintf(
+					'Relais référencé mais introuvable sur cette installation : %s. Poser la constante dans wp-config.php (wp config set %s "https://…" --type=constant).',
+					implode( ', ', $manquantes ),
+					$manquantes[0]
+				)
+			);
+		}
 
 		return new \WP_Error(
 			'anode_form_webhook',

@@ -2451,6 +2451,110 @@ function get_the_date( string $format = '', $post = null ): string {
 		}
 	);
 
+	/* --- L'adresse ne vit pas dans le fichier versionné --------------- */
+
+	echo "\nRelais référencé par une constante\n";
+
+	/*
+	 * Le blocage mesuré le 31/07/2026 sur un site client en préproduction :
+	 * trois formulaires sans relais, donc trois formulaires qui refusaient
+	 * chaque envoi en 502.
+	 *
+	 * La cause n'était pas un oubli : il n'existait aucun endroit où poser
+	 * l'URL qui soit à la fois sûr et propre à l'environnement. Dans le fichier
+	 * versionné, elle part sur GitHub — une URL de scénario n8n est un porteur
+	 * d'autorisation, la connaître suffit à y déverser n'importe quoi — et les
+	 * deux environnements servent le même thème, donc la préproduction
+	 * posterait dans le CRM de production.
+	 */
+
+	test(
+		'une référence résolue est employée comme adresse de relais',
+		function (): void {
+			define( 'ESSAI_WEBHOOK_CONTACT', 'https://relais.exemple.test/par-constante' );
+
+			fixture(
+				'par-reference',
+				[
+					'label'   => 'Référencé',
+					'webhook' => 'constante:ESSAI_WEBHOOK_CONTACT',
+					'fields'  => [ [ 'name' => 'nom', 'label' => 'Nom', 'type' => 'text', 'required' => true ] ],
+				]
+			);
+
+			$GLOBALS['anode_relais'] = [];
+
+			$reponse = submit( [ 'nom' => 'Dupont' ], 'par-reference' );
+
+			assert_true( ! is_wp_error( $reponse ), 'l’envoi a été refusé' );
+			assert_same(
+				'https://relais.exemple.test/par-constante',
+				$GLOBALS['anode_relais'][0]['url'] ?? null,
+				'adresse jointe'
+			);
+		}
+	);
+
+	test(
+		'une référence dont la constante manque refuse l’envoi, et nomme la constante',
+		function (): void {
+			/*
+			 * C'est l'état d'un site fraîchement mis en ligne : le fichier
+			 * versionné est correct, l'installation ne connaît pas encore
+			 * l'adresse. Le motif journalisé doit envoyer ouvrir
+			 * `wp-config.php`, et non relire un fichier qui n'a rien à corriger.
+			 */
+			fixture(
+				'reference-absente',
+				[
+					'label'   => 'Référence non posée',
+					'webhook' => 'constante:ESSAI_WEBHOOK_JAMAIS_DEFINI',
+					'fields'  => [ [ 'name' => 'nom', 'label' => 'Nom', 'type' => 'text', 'required' => true ] ],
+				]
+			);
+
+			$refus = submit( [ 'nom' => 'Dupont' ], 'reference-absente' );
+
+			assert_true( is_wp_error( $refus ), 'l’envoi a été accepté sans destination' );
+			assert_same( 502, $refus->get_error_data()['status'] ?? null, 'statut rendu' );
+
+			$manquantes = references_non_resolues(
+				[ 'webhook' => 'constante:ESSAI_WEBHOOK_JAMAIS_DEFINI' ]
+			);
+
+			assert_same( [ 'ESSAI_WEBHOOK_JAMAIS_DEFINI' ], $manquantes, 'constante nommée' );
+		}
+	);
+
+	test(
+		'une référence mal formée ne désigne aucune constante',
+		function (): void {
+			// Le motif est étroit à dessein : une définition ne doit pas pouvoir
+			// désigner n'importe quelle constante de l'installation.
+			assert_same(
+				'constante:db_password',
+				resoudre_relais( 'constante:db_password' ),
+				'minuscules acceptées comme référence'
+			);
+			assert_same( [], relais_declares( [ 'webhook' => 'constante:db_password' ] ), 'relais retenu' );
+		}
+	);
+
+	test(
+		'l’adresse résolue ne sort jamais vers le navigateur',
+		function (): void {
+			/*
+			 * L'indirection perdrait tout son sens si la route publique servait
+			 * la valeur : l'URL du scénario redeviendrait publique, cette fois
+			 * pour tout visiteur au lieu du seul dépôt.
+			 */
+			$servi = json_encode( describe( new \WP_REST_Request( [ 'name' => 'par-reference' ] ) )->get_data() );
+
+			assert_true( ! str_contains( (string) $servi, 'par-constante' ), 'adresse servie au navigateur' );
+			assert_true( ! str_contains( (string) $servi, 'constante:' ), 'référence servie au navigateur' );
+		}
+	);
+
 	/* --- Ce que le composant branche au noyau ------------------------- */
 
 	echo "\nCrochets branchés\n";
