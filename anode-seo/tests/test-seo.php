@@ -798,6 +798,55 @@ test(
 );
 
 test(
+	'un domaine d’hébergement de recette est reconnu sans rien déclarer',
+	static function (): void {
+		/*
+		 * Mesuré sur une préproduction du parc : `client.anode-staging.fr` était
+		 * traitée en production — l'étiquette n'est pas en tête du nom mais au
+		 * milieu, et la liste ne testait que la tête. Le `noindex` ne tenait plus
+		 * qu'à `blog_public`, une case décochable depuis les réglages.
+		 */
+		putenv( 'WP_ENVIRONMENT_TYPE' );
+
+		foreach (
+			[
+				'https://client.anode-staging.fr',
+				'https://boutique.hebergeur-staging.com',
+				'https://site.client-preprod.fr',
+				'https://staging.exemple.fr',
+				'https://exemple.local',
+			] as $url
+		) {
+			assert_same( false, seo_context( [ 'site_url' => $url ] )['indexable'], $url );
+		}
+	}
+);
+
+test(
+	'un domaine public dont le nom contient une étiquette reste indexable',
+	static function (): void {
+		/*
+		 * Le tort à éviter est l'inverse : dé-indexer un site en ligne. D'où le
+		 * suffixe seul, et l'exclusion de « dev », « test » et « demo » — des
+		 * mots que des sites publics portent dans leur nom.
+		 */
+		putenv( 'WP_ENVIRONMENT_TYPE' );
+
+		foreach (
+			[
+				'https://www.web-dev.fr',
+				'https://demo-cuisine.fr',
+				'https://staging-conseil.fr',
+				'https://developpement-durable.fr',
+				'https://recettes-de-julie.fr',
+			] as $url
+		) {
+			assert_same( true, seo_context( [ 'site_url' => $url ] )['indexable'], $url );
+		}
+	}
+);
+
+test(
 	'la constante l’emporte sur la variable d’environnement',
 	static function (): void {
 		putenv( 'WP_ENVIRONMENT_TYPE=production' );

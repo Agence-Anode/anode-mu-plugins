@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Anode — SEO
  * Description: Titres, méta descriptions, URL canoniques, robots et cartes sociales, pilotables par l'API REST. Remplace Yoast pour un site vitrine.
- * Version:     1.2.0
+ * Version:     1.3.0
  * Author:      Anode
  *
  * Pourquoi une extension maison plutôt que Yoast : un site construit ici n'a
@@ -629,8 +629,12 @@ final class Seo {
 	 *
 	 * `WP_ENVIRONMENT_TYPE` prime sur cette liste : un site servi depuis un
 	 * domaine d'aperçu et réellement destiné au public se déclare.
+	 *
+	 * Publique parce que `wp_health` s'en sert : un domaine de recette sur lequel
+	 * personne n'a déclaré l'environnement est un défaut à signaler avant la
+	 * livraison, pas seulement une entrée à rattraper ici.
 	 */
-	private static function host_looks_transient(): bool {
+	public static function host_looks_transient(): bool {
 		$host = strtolower( (string) wp_parse_url( home_url(), PHP_URL_HOST ) );
 
 		if ( '' === $host ) {
@@ -653,6 +657,29 @@ final class Seo {
 		foreach ( [ 'staging', 'preprod', 'preproduction', 'recette', 'dev', 'test', 'demo', 'sandbox' ] as $etiquette ) {
 			if ( str_starts_with( $host, $etiquette . '.' ) ) {
 				return true;
+			}
+		}
+
+		/*
+		 * Domaine d'hébergement de recette : « client.anode-staging.fr ».
+		 *
+		 * L'étiquette n'est plus en tête du nom, elle est la fin d'un label du
+		 * milieu — c'est la forme que prennent les conventions d'hébergement, la
+		 * nôtre comme celles de Kinsta ou Flywheel, et la liste ci-dessus ne la
+		 * voyait pas. Mesuré sur une préproduction du parc : traitée en
+		 * production, elle ne devait son `noindex` qu'à `blog_public`, une case
+		 * décochable depuis les réglages de WordPress.
+		 *
+		 * Restreint aux étiquettes qu'aucun site public ne porte — `dev`, `test`
+		 * et `demo` en sont écartés, « web-dev.fr » et « demo-cuisine.fr » sont
+		 * des sites qu'on publie — et au suffixe seul : `staging-conseil.fr`
+		 * serait une marque, `conseil-staging.fr` non.
+		 */
+		foreach ( explode( '.', $host ) as $label ) {
+			foreach ( [ 'staging', 'preprod', 'preproduction', 'recette', 'sandbox' ] as $etiquette ) {
+				if ( $label === $etiquette || str_ends_with( $label, '-' . $etiquette ) ) {
+					return true;
+				}
 			}
 		}
 
