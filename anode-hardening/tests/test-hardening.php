@@ -682,6 +682,88 @@ test( 'les en-têtes de base sont posés quoi qu’il arrive', function (): void
 	assertSame( 'SAMEORIGIN', $entetes['X-Frame-Options'] ?? null );
 } );
 
+/* --- API REST d'un site pas encore public ----------------------------- */
+
+section( 'API REST d’un site pas encore public' );
+
+/**
+ * Une requête REST réduite à ce que le filtre en lit : sa route.
+ */
+function requete_rest( string $route ): object {
+	return new class( $route ) {
+		public function __construct( private string $route ) {}
+
+		public function get_route(): string {
+			return $this->route;
+		}
+	};
+}
+
+/** Rejoue `rest_pre_dispatch`, qui reçoit trois arguments et non un seul. */
+function dispatcher( string $route, $resultat = null ) {
+	global $filtres_enregistres;
+
+	$rappels = $filtres_enregistres['rest_pre_dispatch'] ?? [];
+
+	if ( ! $rappels ) {
+		throw new \RuntimeException( 'aucun filtre enregistré sur « rest_pre_dispatch »' );
+	}
+
+	foreach ( $rappels as $rappel ) {
+		$resultat = $rappel( $resultat, null, requete_rest( $route ) );
+	}
+
+	return $resultat;
+}
+
+test( 'hors production, une route de contenu est refusée à l’anonyme', function (): void {
+	/*
+	 * Le défaut mesuré le 01/08/2026 sur la préproduction d'un site client :
+	 * `curl https://…/wp-json/wp/v2/pages` rendait 200 et 19 847 octets, sans le
+	 * moindre identifiant, alors que toute page du site répondait 401. Le
+	 * htpasswd doit exempter `/wp-json/` — l'API attend le mot de passe
+	 * d'application dans le même en-tête — et cette exemption rouvrait tout.
+	 */
+	reinitialiser( [ 'environnement' => 'staging' ] );
+
+	$refus = dispatcher( '/wp/v2/pages' );
+
+	assertTrue( is_wp_error( $refus ), 'le contenu est servi à un visiteur anonyme' );
+	assertSame( 'anode_rest_prive', $refus->get_error_code() );
+} );
+
+test( 'le moteur de formulaire reste ouvert', function (): void {
+	// Sinon chaque formulaire est inerte sur la préproduction — donc là même où
+	// le client le relit.
+	reinitialiser( [ 'environnement' => 'staging' ] );
+
+	assertSame( null, dispatcher( '/anode/v1/form/contact' ) );
+	assertSame( null, dispatcher( '/anode/v1/form' ) );
+} );
+
+test( 'le compte de service, authentifié, passe', function (): void {
+	// C'est tout le pilotage sans SSH qui en dépend.
+	reinitialiser( [ 'environnement' => 'staging', 'connecte' => true ] );
+
+	assertSame( null, dispatcher( '/wp/v2/pages' ) );
+} );
+
+test( 'en production, l’API sert le public comme avant', function (): void {
+	reinitialiser( [ 'environnement' => 'production' ] );
+
+	assertSame( null, dispatcher( '/wp/v2/pages' ) );
+} );
+
+test( 'un refus déjà décidé ailleurs n’est pas remplacé', function (): void {
+	// Écraser le verdict d'un autre filtre ferait disparaître son motif, et le
+	// diagnostic avec.
+	reinitialiser( [ 'environnement' => 'staging' ] );
+
+	$deja = new \WP_Error( 'autre_chose', 'motif d’origine' );
+
+	assertSame( 'autre_chose', dispatcher( '/wp/v2/pages', $deja )->get_error_code() );
+} );
+
 /* --- Compte rendu ---------------------------------------------------- */
 
 echo "\n{$passed} test(s) réussi(s), {$failed} échec(s).\n";

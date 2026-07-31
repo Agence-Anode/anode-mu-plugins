@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Anode — durcissement
  * Description: Sécurité de base sans extension tierce : URL de connexion masquée, limitation des tentatives, en-têtes de sécurité, XML-RPC coupé, énumération des comptes bloquée.
- * Version:     1.4.1
+ * Version:     1.5.0
  * Author:      Anode
  *
  * Remplace SecuPress Pro et WPS Hide Login.
@@ -668,6 +668,84 @@ add_filter(
 
 		return $endpoints;
 	}
+);
+
+/**
+ * Les routes qu'un visiteur anonyme doit atteindre, même sur un site fermé.
+ *
+ * Le moteur de formulaire, et lui seul : le navigateur lit la définition
+ * (`GET /anode/v1/form/<nom>`) puis poste la demande (`POST /anode/v1/form`).
+ * Les fermer rendrait chaque formulaire inerte sur une préproduction —
+ * c'est‑à‑dire à l'endroit précis où on le fait relire au client.
+ *
+ * @var list<string>
+ */
+const ROUTES_REST_PUBLIQUES = [ '/anode/v1/form' ];
+
+/**
+ * Hors production, l'API REST ne répond pas à un visiteur anonyme.
+ *
+ * Une préproduction est fermée par une authentification HTTP au niveau du
+ * serveur — **sauf `/wp-json/`, qui doit rester en dehors** : l'API attend le
+ * mot de passe d'application dans l'en-tête `Authorization`, et le htpasswd
+ * consommerait le même en-tête. `mcp/anode-wp/src/wp-client.js` le dit à
+ * l'endroit où il s'en abstient. Sans cette exemption, plus aucun pilotage.
+ *
+ * L'exemption rouvrait tout le reste, et personne ne l'avait décidé. Mesuré le
+ * 01/08/2026 sur la préproduction d'un site client, sans le moindre
+ * identifiant :
+ *
+ *     curl https://…/wp-json/wp/v2/pages   →   200, 19 847 octets
+ *
+ * — le contenu rendu de chaque page d'un site que l'authentification HTTP est
+ * censée garder fermé jusqu'à la mise en ligne, et que `robots.txt` interdit
+ * d'explorer six lignes plus haut. `/wp/v2/users` était déjà fermé juste
+ * au-dessus ; les pages, elles, passaient, et avec elles les types de contenu
+ * du projet.
+ *
+ * Le partage se fait donc là où l'on sait qui appelle : WordPress. Le compte de
+ * service, authentifié par mot de passe d'application, passe — le pilotage est
+ * intact. Le visiteur anonyme reçoit 401, comme sur le reste du site.
+ *
+ * En production le filtre s'efface : un site public sert ses pages, c'est son
+ * objet. Le repère est le même que celui de `robots_txt` ci‑dessus, et il bascule
+ * tout seul le jour de la mise en ligne.
+ */
+add_filter(
+	'rest_pre_dispatch',
+	static function ( $resultat, $serveur, $requete ) {
+		if ( null !== $resultat || is_user_logged_in() || 'production' === wp_get_environment_type() ) {
+			return $resultat;
+		}
+
+		$route = is_object( $requete ) && method_exists( $requete, 'get_route' )
+			? (string) $requete->get_route()
+			: '';
+
+		/**
+		 * Permet à un site d'ouvrir une route de plus — une façade publique, un
+		 * flux consommé par un tiers. Le filtre existe pour que ce cas ne se
+		 * règle pas en modifiant le mu-plugin, ce qui le ferait diverger du
+		 * blueprint sans que rien ne le signale.
+		 *
+		 * @param list<string> $prefixes Préfixes de route laissés ouverts.
+		 */
+		$ouvertes = (array) apply_filters( 'anode/hardening/routes_rest_publiques', ROUTES_REST_PUBLIQUES );
+
+		foreach ( $ouvertes as $prefixe ) {
+			if ( is_string( $prefixe ) && '' !== $prefixe && 0 === strpos( $route, $prefixe ) ) {
+				return $resultat;
+			}
+		}
+
+		return new \WP_Error(
+			'anode_rest_prive',
+			'Ce site n’est pas encore public : son API REST demande une authentification.',
+			[ 'status' => 401 ]
+		);
+	},
+	10,
+	3
 );
 
 /**
