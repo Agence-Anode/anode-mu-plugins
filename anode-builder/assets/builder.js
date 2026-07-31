@@ -347,6 +347,49 @@
       .map((icone) => icone.closest('li'))
       .find(Boolean) ?? null;
 
+    /**
+     * Sommes-nous déjà **dans** un composant ?
+     *
+     * C'est la question qui manquait, et son absence rendait la fonction
+     * instable au point d'être nuisible. Le bouton du panneau ne signifie pas
+     * « voici un composant à ouvrir » : le rendu de Bricks l'affiche aussi pour
+     * un composant **imbriqué**, alors même qu'on est déjà en train d'en éditer
+     * un. Et `setActiveComponent` appliqué au composant courant **bascule** :
+     * il fait sortir.
+     *
+     * D'où les trois symptômes constatés, qui n'en font qu'un : on sortait sans
+     * savoir pourquoi ; un troisième clic — qui forme un second double-clic avec
+     * le deuxième — nous éjectait ; et sélectionner un élément imbriqué faisait
+     * de même.
+     *
+     * Le repère est le panneau de structure. Au niveau de la page, les lignes
+     * racines portent `data-parent-id="0"`. En édition de composant, la racine
+     * affichée est le composant lui-même : plus aucune ligne n'a `0` pour parent.
+     * Mesuré dans le builder, et c'est un booléen franc, pas une heuristique.
+     */
+    const dansUnComposant = () => document.querySelector('#bricks-structure li.element') !== null
+      && document.querySelector('#bricks-structure li.element[data-parent-id="0"]') === null;
+
+    /*
+     * Un verrou de temps, en plus.
+     *
+     * Trois clics rapides produisent **deux** événements `dblclick` : les clics 1‑2,
+     * puis les clics 2‑3. Le second retombait sur notre gestionnaire à un moment où
+     * le panneau n'avait pas encore basculé, donc où le bouton était encore là. Le
+     * verrou avale ce second passage.
+     */
+    let derniereAction = 0;
+
+    const tropTot = () => {
+      const maintenant = Date.now();
+
+      if (maintenant - derniereAction < 700) return true;
+
+      derniereAction = maintenant;
+
+      return false;
+    };
+
     document.addEventListener('dblclick', async (evenement) => {
       const ligne = evenement.target.closest?.('#bricks-structure li.element.component');
 
@@ -354,6 +397,10 @@
 
       // Un champ en cours d'édition : le double-clic y sélectionne un mot.
       if (evenement.target.closest('input, textarea, [contenteditable="true"]')) return;
+
+      // Déjà dans un composant : on ne touche plus à rien. Le renommage, la
+      // sélection et le déplacement doivent y fonctionner comme sans nous.
+      if (dansUnComposant()) return;
 
       /*
        * On ne devance Bricks **que** si l'on a réellement quelque chose à ouvrir.
@@ -371,7 +418,7 @@
        */
       const bouton = boutonDuPanneau();
 
-      if (!bouton) return;
+      if (!bouton || tropTot()) return;
 
       evenement.preventDefault();
       evenement.stopPropagation();
@@ -398,12 +445,14 @@
       fenetre.document.addEventListener('dblclick', (evenement) => {
         if (evenement.target.closest?.('input, textarea, [contenteditable="true"]')) return;
 
-        // Même règle que dans la structure : le bouton décide, et rien n'est
-        // bloqué en son absence. C'est ce qui rend la sélection et le
-        // déplacement dans le canevas intacts une fois entré dans un composant.
+        // Les mêmes trois gardes que dans la structure, et dans le même ordre :
+        // déjà dedans, on ne fait rien ; pas de bouton, on ne fait rien ; trop
+        // rapproché du précédent, on avale.
+        if (dansUnComposant()) return;
+
         const bouton = boutonDuPanneau();
 
-        if (!bouton) return;
+        if (!bouton || tropTot()) return;
 
         cliquer(bouton);
       }, true);

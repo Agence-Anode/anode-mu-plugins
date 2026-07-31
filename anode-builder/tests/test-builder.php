@@ -452,6 +452,38 @@ test( 'aucune notion d’« élément courant » ne subsiste', function (): void
 	);
 } );
 
+test( 'rien n’est intercepté quand on est déjà dans un composant', function (): void {
+	/*
+	 * La cause des trois instabilités constatées, qui n'en faisaient qu'une.
+	 *
+	 * Le bouton du panneau ne veut pas dire « voici un composant à ouvrir » : le
+	 * rendu de Bricks l'affiche aussi pour un composant **imbriqué**, alors qu'on
+	 * est déjà en train d'éditer. Et `setActiveComponent` sur le composant courant
+	 * **bascule** — il fait sortir. D'où : on sortait sans savoir pourquoi, un
+	 * troisième clic éjectait, et sélectionner un élément imbriqué aussi.
+	 *
+	 * Le repère est franc : au niveau de la page, des lignes de structure portent
+	 * `data-parent-id="0"` ; en édition de composant, plus aucune.
+	 */
+	assert_true( str_contains( code(), 'dansUnComposant' ), 'la garde a disparu' );
+	assert_true(
+		str_contains( code(), 'data-parent-id="0"' ),
+		'le repère de niveau de page n’est plus consulté'
+	);
+
+	// Deux gestionnaires, deux fois la garde : celui de la structure et celui du
+	// canevas. N'en protéger qu'un laisserait la moitié du défaut.
+	assert_same( 2, substr_count( code(), 'if (dansUnComposant()) return;' ), 'nombre de gardes' );
+} );
+
+test( 'trois clics rapides ne produisent qu’une seule action', function (): void {
+	// Trois clics forment **deux** `dblclick` — les clics 1‑2, puis 2‑3. Le second
+	// retombait sur le gestionnaire avant que le panneau ait basculé, donc sur un
+	// bouton encore présent, et faisait ressortir aussitôt.
+	assert_true( str_contains( code(), 'tropTot' ), 'le verrou de temps a disparu' );
+	assert_same( 2, substr_count( code(), 'tropTot()' ), 'le verrou ne protège pas les deux gestionnaires' );
+} );
+
 test( 'le double-clic ne devance Bricks que s’il a de quoi ouvrir', function (): void {
 	/*
 	 * La régression la plus grave de cette série : couper le geste d'abord et
