@@ -1,0 +1,80 @@
+/**
+ * Confort du builder — habillage du curseur de largeur.
+ *
+ * Cette feuille est une exception assumée à la règle « les styles vivent dans les
+ * panneaux de Bricks » : elle habille l'interface du **builder**, pas le site. Ce
+ * balisage n'existe dans aucune page, donc aucun panneau ne peut le porter.
+ *
+ * Les couleurs reprennent celles du builder plutôt que les tokens du site : ce
+ * curseur vit dans Bricks, et suivre la charte du client le rendrait étranger à
+ * l'outil dans lequel il apparaît.
+ */
+
+.anode-builder-curseur {
+  position: relative;
+  display: flex;
+  align-items: center;
+  min-width: 120px;
+  padding: 0 10px;
+  /* La barre d'outils est en flex : sans cela le curseur se comprime à rien
+     dès que la fenêtre se resserre. */
+  flex: 1 1 120px;
+  max-width: 260px;
+}
+
+.anode-builder-curseur__champ {
+  width: 100%;
+  height: 4px;
+  margin: 0;
+  padding: 0;
+  appearance: none;
+  background: rgba(255, 255, 255, 0.22);
+  border-radius: 2px;
+  cursor: ew-resize;
+}
+
+/* Les deux moteurs demandent leur propre sélecteur, et une règle groupée serait
+   entièrement ignorée par les deux : ils écartent la liste dès qu'un sélecteur
+   leur est inconnu. */
+.anode-builder-curseur__champ::-webkit-slider-thumb {
+  appearance: none;
+  width: 12px;
+  height: 12px;
+  border: 0;
+  border-radius: 50%;
+  background: #fff;
+  cursor: ew-resize;
+}
+
+.anode-builder-curseur__champ::-moz-range-thumb {
+  width: 12px;
+  height: 12px;
+  border: 0;
+  border-radius: 50%;
+  background: #fff;
+  cursor: ew-resize;
+}
+
+.anode-builder-curseur__champ:focus-visible {
+  outline: 2px solid #fff;
+  outline-offset: 4px;
+}
+
+/* Les repères sont sous le rail, sans intercepter le pointeur : posés dessus,
+   ils empêcheraient de saisir la poignée à l'endroit d'un point de rupture —
+   exactement là où l'on veut s'arrêter. */
+.anode-builder-curseur__reperes {
+  position: absolute;
+  inset: auto 10px -6px 10px;
+  height: 4px;
+  pointer-events: none;
+}
+
+.anode-builder-curseur__repere {
+  position: absolute;
+  top: 0;
+  width: 1px;
+  height: 4px;
+  background: rgba(255, 255, 255, 0.5);
+  transform: translateX(-50%);
+}
