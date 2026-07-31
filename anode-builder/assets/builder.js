@@ -53,6 +53,27 @@
   });
 
   /**
+   * Attend qu'une condition rende quelque chose, en scrutant à petits pas.
+   *
+   * `MutationObserver` ne conviendrait pas ici : la condition porte sur un
+   * contenu que Vue remplace, et l'observateur se déclencherait des dizaines de
+   * fois par frappe. Une scrutation courte et bornée est plus lisible, et elle
+   * s'arrête d'elle-même.
+   */
+  const patienter = async (condition, delai) => {
+    const fin = Date.now() + delai;
+
+    for (;;) {
+      const valeur = condition();
+
+      if (valeur) return valeur;
+      if (Date.now() > fin) return null;
+
+      await new Promise((resolve) => requestAnimationFrame(resolve));
+    }
+  };
+
+  /**
    * Un clic que Vue entend.
    *
    * `el.click()` suffit pour un gestionnaire posé par Vue sur cet élément même,
@@ -254,7 +275,7 @@
    * de Bricks, « Enregistrer comme composant » précède « Modifier ».
    */
   const composantDblclic = () => {
-    document.addEventListener('dblclick', (evenement) => {
+    document.addEventListener('dblclick', async (evenement) => {
       const ligne = evenement.target.closest?.('#bricks-structure li.element.component');
 
       if (!ligne) return;
@@ -275,16 +296,36 @@
         button: 2,
       }));
 
-      // Le menu est rendu par Vue : il n'existe qu'au tour de boucle suivant.
-      requestAnimationFrame(() => {
-        const menu = document.querySelector('#bricks-builder-context-menu');
-        const entrees = menu ? [...menu.querySelectorAll(':scope > li.components')] : [];
-        const entree = entrees[entrees.length - 1];
+      /*
+       * Le menu se **remplit** après coup, et c'est le piège mesuré.
+       *
+       * `#bricks-builder-context-menu` existe en permanence dans le DOM, vide et
+       * masqué : le trouver ne prouve rien. Ses entrées, elles, sont rendues par
+       * Vue au tour de boucle suivant — parfois au surlendemain. Un seul
+       * `requestAnimationFrame` arrivait trop tôt : l'élément était là, la liste
+       * vide, et le double-clic ne faisait que sélectionner la ligne. On attend
+       * donc l'entrée elle-même, pas le menu.
+       */
+      const entree = await patienter(
+        () => {
+          const menu = document.querySelector('#bricks-builder-context-menu');
+          const entrees = menu ? [...menu.querySelectorAll(':scope > li.components')] : [];
 
-        if (!entree) return;
+          return entrees[entrees.length - 1] ?? null;
+        },
+        600,
+      );
 
-        cliquer(entree);
-      });
+      if (!entree) {
+        // Le menu resterait ouvert sur un clic qui n'a pas eu lieu : on le referme
+        // comme le ferait un utilisateur, plutôt que de laisser l'interface en
+        // plan.
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+
+        return;
+      }
+
+      cliquer(entree);
     }, true);
   };
 
