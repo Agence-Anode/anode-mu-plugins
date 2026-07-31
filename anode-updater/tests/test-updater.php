@@ -165,6 +165,20 @@ test( 'par défaut, correctifs et mineures passent, les majeures attendent', fun
 	assert_that( ! Updater::auto_autorise( 'majeure' ), 'une majeure ne devrait pas passer seule' );
 } );
 
+test( 'un palier inconnu ne s’applique jamais seul', function (): void {
+	/*
+	 * La mine : `array_search` rend `false` pour un palier inconnu, et
+	 * `false <= 1` est **vrai** en PHP. Le palier inconnu passait donc pour un
+	 * correctif — le plus bas — et s'installait tout seul. Aucun appel ne
+	 * pouvait l'atteindre tant que `palier()` ne rendait que trois valeurs,
+	 * mais le quatrième cas est arrivé : « nouveau », la première pose d'un
+	 * composant absent, qui doit précisément attendre une décision.
+	 */
+	assert_that( ! Updater::auto_autorise( 'nouveau' ), 'une première pose ne devrait pas s’appliquer seule' );
+	assert_that( ! Updater::auto_autorise( 'patch' ), 'un palier en anglais ne devrait rien appliquer' );
+	assert_that( ! Updater::auto_autorise( '' ), 'un palier vide ne devrait rien appliquer' );
+} );
+
 test( 'un réglage explicite fixe le plafond', function (): void {
 	assert_same( 'majeure', Updater::plafond_auto( true ), 'true accepte tout :' );
 	assert_same( null, Updater::plafond_auto( false ), 'false n’applique rien :' );
@@ -391,6 +405,15 @@ echo "\nSignature des archives\n";
  * Le figer ici plutôt que de resigner à la volée est le seul moyen d'éprouver
  * l'interopérabilité **dans la suite** : ce que PHP vérifie, c'est bien ce que
  * Node produit, et un changement de format d'un côté fait tomber ce test.
+ */
+/*
+ * Les quatre valeurs ci-dessous sont **solidaires** : modifier un seul octet du
+ * texte signé invalide la signature. C'est voulu — c'est exactement ce que le
+ * test vérifie —, et c'est ce qui l'a fait tomber sur le blueprint jumeau lors
+ * d'un renommage global qui avait réécrit la chaîne signée sans toucher à la
+ * signature. Pour les régénérer :
+ *
+ *   node bin/release-mu-plugin.mjs --generer-cle
  */
 $archive_signee = 'PK archive factice de anode-cache 1.2.0';
 $cle_publique   = '7B/X4q9rvHoqsxIZO2qJaw7bOKSbweAYRik3BrfPRE8=';

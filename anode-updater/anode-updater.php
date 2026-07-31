@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Anode — mises à jour
  * Description: Tient à jour les mu-plugins maison depuis leurs dépôts GitHub. Vérifie chaque jour, applique les correctifs et les versions mineures, retient les majeures.
- * Version:     1.5.0
+ * Version:     1.6.0
  * Author:      Anode
  * Requires PHP: 8.1
  *
@@ -415,7 +415,31 @@ final class Updater {
 			return false;
 		}
 
-		return array_search( $palier, self::PALIERS, true ) <= array_search( $plafond, self::PALIERS, true );
+		$rang = array_search( $palier, self::PALIERS, true );
+
+		/*
+		 * Un palier inconnu est refusé, explicitement.
+		 *
+		 * Sans cette garde, `array_search` rend `false`, et `false <= 1` est
+		 * **vrai** en PHP : le palier inconnu passait pour un correctif, donc
+		 * s'installait seul. Aucun appel ne pouvait l'atteindre — `palier()` ne
+		 * rend que les trois valeurs connues — mais c'était une mine pour le
+		 * premier qui ajouterait un cas, et le cas est arrivé (« nouveau »,
+		 * l'installation d'un composant encore absent).
+		 */
+		if ( false === $rang ) {
+			self::tracer(
+				sprintf(
+					'Palier « %s » inconnu (%s) : rien ne s’applique seul.',
+					$palier,
+					implode( ', ', self::PALIERS )
+				)
+			);
+
+			return false;
+		}
+
+		return $rang <= array_search( $plafond, self::PALIERS, true );
 	}
 
 	/**

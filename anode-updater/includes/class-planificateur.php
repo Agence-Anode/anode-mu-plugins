@@ -194,12 +194,7 @@ final class Planificateur {
 	 */
 	private static function examiner( string $nom, array $composant ): array {
 		$installee = Installateur::version_installee( $nom );
-
-		if ( null === $installee ) {
-			return [ 'etat' => 'absent', 'message' => 'Composant non installé sur ce site.' ];
-		}
-
-		$releases = Source::releases( (string) $composant['repo'] );
+		$releases  = Source::releases( (string) $composant['repo'] );
 
 		if ( is_wp_error( $releases ) ) {
 			// Un dépôt qui n'existe pas encore n'est pas une panne : c'est un
@@ -223,6 +218,37 @@ final class Planificateur {
 		}
 
 		$publiee = $derniere['version'];
+
+		/*
+		 * Un composant déclaré mais absent du site : il attend une décision.
+		 *
+		 * Ce cas rendait « absent » et s'arrêtait là. Conséquence : ajouter un
+		 * composant au blueprint obligeait à repasser sur chaque site pour le
+		 * poser à la main — précisément ce que ce canal existe pour éviter, et la
+		 * garantie qu'un site oublié reste sans lui indéfiniment.
+		 *
+		 * Il n'est pas installé seul pour autant. Une mise à jour remplace du code
+		 * que le site avait déjà ; une première pose en **ajoute**, et cela ne se
+		 * décide pas à quatre heures du matin sans que personne l'ait demandé.
+		 * D'où le même traitement qu'une majeure : téléchargé, annoncé, installé
+		 * sur décision — un appel à `anode/updater/appliquer` suffit alors, sans
+		 * SSH.
+		 *
+		 * Le palier vaut « nouveau », qu'`auto_autorise()` refuse explicitement.
+		 */
+		if ( null === $installee ) {
+			return [
+				'etat'      => 'en-attente',
+				'installee' => null,
+				'publiee'   => $publiee,
+				'palier'    => 'nouveau',
+				'message'   => sprintf(
+					'%s %s est publié mais absent de ce site. Une première installation ajoute du code : elle attend une décision.',
+					$nom,
+					$publiee
+				),
+			];
+		}
 
 		if ( version_compare( $publiee, $installee, '<=' ) ) {
 			return [ 'etat' => 'a-jour', 'installee' => $installee, 'publiee' => $publiee ];
