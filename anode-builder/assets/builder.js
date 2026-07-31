@@ -120,12 +120,19 @@
 
       const liste = pastilles();
 
-      // Aucune classe : l'élément n'en porte pas, il n'y a rien à préférer à son
-      // `id`. On note quand même l'élément, pour ne pas repasser en boucle.
-      if (!liste.length) {
-        dernierElement = element;
-        return;
-      }
+      /*
+       * Une liste vide ne veut pas dire « pas de classes ».
+       *
+       * Le panneau se remplit **après** que la ligne devient active : au premier
+       * élément d'une session, l'observateur nous appelle avant que les pastilles
+       * n'existent. Retenir l'élément à cet instant le condamnait — on ne
+       * repassait plus jamais dessus. Symptôme mesuré côté utilisateur : la
+       * fonction ne marchait qu'à partir du **deuxième** élément sélectionné.
+       *
+       * On ne retient donc que ce qu'on a réellement pu traiter. L'observateur
+       * nous rappellera au rendu suivant, cette fois avec la liste.
+       */
+      if (!liste.length) return;
 
       dernierElement = element;
 
@@ -167,12 +174,19 @@
    * Le curseur écrit dans le champ de Bricks, il ne pilote pas le canevas.
    *
    * C'est ce qui le rend robuste : la largeur reste gérée par Vue, avec sa mise à
-   * l'échelle, son point de rupture actif et son verrou. Nous ne faisons que
-   * poser une valeur et prévenir — `input` pour que le modèle suive, `change`
-   * pour les gestionnaires qui n'écoutent que la validation.
+   * l'échelle, son point de rupture actif et son verrou.
    *
-   * Le maximum vient du plus large point de rupture, avec une marge : au-delà,
-   * Bricks réduit l'aperçu à l'échelle, et balayer plus loin n'apprend rien.
+   * **Mais ce champ n'est pas en `v-model`.** Relevé dans le rendu de Bricks : il
+   * porte `value` en liaison descendante, et ne relit la saisie que sur
+   * `onBlur` et sur `onKeyup` filtré par la touche Entrée. Poser la valeur puis
+   * émettre `input` ne déclenchait donc rien — le champ affichait la nouvelle
+   * largeur et le canevas gardait l'ancienne. C'est exactement ce qui a été
+   * constaté à l'usage. On simule donc la touche Entrée, qui est le geste que
+   * Bricks écoute.
+   *
+   * Le sens est inversé à dessein : le plus large à gauche, le plus étroit à
+   * droite. C'est l'ordre dans lequel on conçoit — on part du bureau et on
+   * resserre — et l'ordre des points de rupture de Bricks lui-même.
    */
   const curseurLargeur = async () => {
     const champ = await attendre('#bricks-toolbar input#preview-width');
@@ -186,6 +200,16 @@
 
     const min = 320;
     const max = Math.max(1920, (ruptures[ruptures.length - 1] ?? 1280) + 200);
+
+    /*
+     * Le curseur porte une valeur **miroir**, pas la largeur.
+     *
+     * Inverser par `direction: rtl` aurait suffi au rendu, mais laissait les
+     * repères à calculer dans l'autre sens — deux systèmes de coordonnées pour
+     * un seul curseur, et la première correction à côté se pose dans le mauvais.
+     * Ici, un seul calcul : `miroir = min + max - largeur`, dans les deux sens.
+     */
+    const miroir = (valeur) => min + max - valeur;
 
     const enveloppe = document.createElement('div');
     enveloppe.className = 'anode-builder-curseur';
@@ -208,15 +232,28 @@
     const graduations = document.createElement('div');
     graduations.className = 'anode-builder-curseur__reperes';
 
-    ruptures.forEach((largeur) => {
-      if (largeur < min || largeur > max) return;
+    /*
+     * Les repères sont les points de rupture **de ce site**, lus dans
+     * `bricksData.breakpoints` — ceux que Bricks vient de servir, pas une liste
+     * écrite en dur. Ajouter, déplacer ou supprimer un point de rupture les
+     * déplace donc, et cette fonction les redessine dès que la liste change,
+     * sans recharger le builder.
+     */
+    const dessinerReperes = (largeurs) => {
+      graduations.textContent = '';
 
-      const repere = document.createElement('span');
-      repere.className = 'anode-builder-curseur__repere';
-      repere.style.left = `${((largeur - min) / (max - min)) * 100}%`;
-      repere.title = `${i18n.pointDeRupture ?? 'Point de rupture'} : ${largeur} px`;
-      graduations.append(repere);
-    });
+      largeurs.forEach((largeur) => {
+        if (largeur < min || largeur > max) return;
+
+        const repere = document.createElement('span');
+        repere.className = 'anode-builder-curseur__repere';
+        repere.style.left = `${((miroir(largeur) - min) / (max - min)) * 100}%`;
+        repere.title = `${i18n.pointDeRupture ?? 'Point de rupture'} : ${largeur} px`;
+        graduations.append(repere);
+      });
+    };
+
+    dessinerReperes(ruptures);
 
     enveloppe.append(curseur, graduations);
 
@@ -227,17 +264,37 @@
     (groupe ?? champ).after(enveloppe);
 
     const versLeChamp = () => {
-      champ.value = curseur.value;
-      champ.dispatchEvent(new Event('input', { bubbles: true }));
-      champ.dispatchEvent(new Event('change', { bubbles: true }));
+      // Un champ en lecture seule, c'est la largeur du bureau verrouillée par
+      // Bricks : la respecter plutôt que d'écrire une valeur qu'il ignorera.
+      if (champ.readOnly) return;
+
+      champ.value = String(miroir(Number.parseInt(curseur.value, 10)));
+
+      // La seule liaison que Bricks écoute pour ce champ. `input` et `change`
+      // n'y sont pas branchés : mesuré sur le rendu, et constaté à l'usage.
+      champ.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', bubbles: true }));
     };
 
     const depuisLeChamp = () => {
       const largeur = Number.parseInt(champ.value, 10);
 
-      if (!Number.isFinite(largeur)) return;
+      if (Number.isFinite(largeur)) {
+        curseur.value = String(miroir(Math.min(Math.max(largeur, min), max)));
+      }
 
-      curseur.value = String(Math.min(Math.max(largeur, min), max));
+      // Les points de rupture peuvent avoir changé depuis le dernier passage :
+      // on ne redessine que si la liste a bougé, pour ne pas recréer des nœuds
+      // trois fois par seconde.
+      const actuelles = (window.bricksData?.breakpoints ?? [])
+        .map((b) => Number.parseInt(b.width, 10))
+        .filter((valeur) => Number.isFinite(valeur) && valeur > 0)
+        .sort((a, b) => a - b);
+
+      if (actuelles.join() !== ruptures.join()) {
+        ruptures.length = 0;
+        ruptures.push(...actuelles);
+        dessinerReperes(ruptures);
+      }
     };
 
     curseur.addEventListener('input', versLeChamp);
@@ -262,70 +319,55 @@
    * ------------------------------------------------------------------ */
 
   /**
-   * On emprunte le chemin de Bricks : clic droit, puis « Modifier le composant ».
+   * On passe par le bouton du panneau, pas par le menu contextuel.
    *
-   * Appeler `$_setActiveComponent()` serait plus direct, et c'est justement ce
-   * qu'on évite : la méthode n'est atteignable qu'à travers une instance Vue, que
-   * `__vueParentComponent` n'expose pas dans un build de production. Le menu
-   * contextuel, lui, est du DOM — et il fait exactement ce que fait un humain.
+   * Deux raisons, toutes deux mesurées.
    *
-   * L'entrée est reconnue par sa classe `components`, non par son libellé : celui
-   * est traduit, et un builder en anglais ne dirait pas « Modifier le composant ».
-   * Quand plusieurs entrées la portent, c'est la dernière — dans l'ordre de rendu
-   * de Bricks, « Enregistrer comme composant » précède « Modifier ».
+   * D'abord le menu : `#bricks-builder-context-menu` existe en permanence dans le
+   * DOM, vide, et ne se **remplit** qu'après un rendu de Vue. Le trouver ne
+   * prouvait rien, et le clic partait dans le vide — le double-clic ne faisait
+   * alors que sélectionner la ligne, en laissant parfois le menu ouvert sur une
+   * entrée voisine.
+   *
+   * Ensuite, Bricks **utilise déjà le double-clic** sur `.structure-item` : c'est
+   * son mode « renommer ». Notre gestionnaire doit donc le devancer et l'arrêter,
+   * sans quoi les deux comportements se superposent.
+   *
+   * Le bouton, lui, est du DOM stable : dans `#bricks-panel`, le `li` qui contient
+   * `span.bricks-svg-wrapper.component`. Il n'apparaît qu'une fois le composant
+   * sélectionné, et disparaît dès qu'on est entré dedans — ce qui en fait aussi
+   * le signal de réussite. Sa classe est visée, jamais son `data-balloon`, qui est
+   * traduit.
    */
   const composantDblclic = () => {
+    const boutonDuPanneau = () => [...document.querySelectorAll('#bricks-panel span.bricks-svg-wrapper.component')]
+      .map((icone) => icone.closest('li'))
+      .find(Boolean) ?? null;
+
     document.addEventListener('dblclick', async (evenement) => {
       const ligne = evenement.target.closest?.('#bricks-structure li.element.component');
 
       if (!ligne) return;
 
-      // Une ligne en cours de renommage contient un champ : le double-clic y sert
-      // à sélectionner un mot, pas à ouvrir le composant.
+      // Un champ en cours d'édition : le double-clic y sélectionne un mot.
       if (evenement.target.closest('input, textarea, [contenteditable="true"]')) return;
 
+      // Devance le « renommer » de Bricks, posé sur le même geste.
       evenement.preventDefault();
       evenement.stopPropagation();
+      evenement.stopImmediatePropagation();
 
-      const ancre = ligne.querySelector('.structure-item .label') ?? ligne;
+      // Le bouton n'existe que pour le composant sélectionné : on s'assure que
+      // c'est bien celui qu'on vient de double-cliquer.
+      const item = ligne.querySelector('.structure-item');
 
-      ancre.dispatchEvent(new MouseEvent('contextmenu', {
-        bubbles: true,
-        cancelable: true,
-        view: window,
-        button: 2,
-      }));
+      if (item) cliquer(item);
 
-      /*
-       * Le menu se **remplit** après coup, et c'est le piège mesuré.
-       *
-       * `#bricks-builder-context-menu` existe en permanence dans le DOM, vide et
-       * masqué : le trouver ne prouve rien. Ses entrées, elles, sont rendues par
-       * Vue au tour de boucle suivant — parfois au surlendemain. Un seul
-       * `requestAnimationFrame` arrivait trop tôt : l'élément était là, la liste
-       * vide, et le double-clic ne faisait que sélectionner la ligne. On attend
-       * donc l'entrée elle-même, pas le menu.
-       */
-      const entree = await patienter(
-        () => {
-          const menu = document.querySelector('#bricks-builder-context-menu');
-          const entrees = menu ? [...menu.querySelectorAll(':scope > li.components')] : [];
+      const bouton = await patienter(boutonDuPanneau, 1200);
 
-          return entrees[entrees.length - 1] ?? null;
-        },
-        600,
-      );
+      if (!bouton) return;
 
-      if (!entree) {
-        // Le menu resterait ouvert sur un clic qui n'a pas eu lieu : on le referme
-        // comme le ferait un utilisateur, plutôt que de laisser l'interface en
-        // plan.
-        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
-
-        return;
-      }
-
-      cliquer(entree);
+      cliquer(bouton);
     }, true);
   };
 

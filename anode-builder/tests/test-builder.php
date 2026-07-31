@@ -325,11 +325,11 @@ test( 'chaque sélecteur relevé est présent dans le script', function (): void
 	 * rend une fonction inerte, sans erreur ni trace.
 	 */
 	$attendus = [
-		'.active-classes li'                            => 'les classes de l’élément',
-		'#bricks-toolbar input#preview-width'           => 'la largeur du canevas',
-		'#bricks-structure li.element.active'           => 'l’élément sélectionné',
-		'#bricks-structure li.element.component'        => 'une ligne de composant',
-		'#bricks-builder-context-menu'                  => 'le menu contextuel',
+		'.active-classes li'                                       => 'les classes de l’élément',
+		'#bricks-toolbar input#preview-width'                      => 'la largeur du canevas',
+		'#bricks-structure li.element.active'                      => 'l’élément sélectionné',
+		'#bricks-structure li.element.component'                   => 'une ligne de composant',
+		'#bricks-panel span.bricks-svg-wrapper.component'          => 'le bouton d’édition du composant',
 	];
 
 	foreach ( $attendus as $selecteur => $role ) {
@@ -340,12 +340,69 @@ test( 'chaque sélecteur relevé est présent dans le script', function (): void
 	}
 } );
 
-test( 'l’entrée du menu est reconnue par sa classe, pas par son libellé', function (): void {
-	// Le libellé est traduit : « Modifier le composant » en français, « Edit
-	// component » en anglais. S'y fier casserait la fonction sur un builder dans
-	// une autre langue que la nôtre.
-	assert_true( str_contains( code(), 'li.components' ), 'la classe de l’entrée n’est plus visée' );
+test( 'le bouton est reconnu par sa classe, jamais par son libellé', function (): void {
+	// `data-balloon` vaut « Modifier le composant » en français et « Edit
+	// component » en anglais : s'y fier casserait la fonction sur tout builder
+	// dans une autre langue que la nôtre.
 	assert_true( ! str_contains( code(), 'Modifier le composant' ), 'le libellé traduit est visé' );
+	assert_true( ! str_contains( code(), 'data-balloon' ), 'un attribut traduit est visé' );
+} );
+
+test( 'le menu contextuel n’est plus employé', function (): void {
+	/*
+	 * Il l'a été, et c'était le défaut : `#bricks-builder-context-menu` existe en
+	 * permanence dans le DOM, vide, et ne se remplit qu'après un rendu de Vue. Le
+	 * trouver ne prouvait rien — le clic partait dans le vide, et le double-clic
+	 * ne faisait que sélectionner la ligne.
+	 */
+	assert_true(
+		! str_contains( code(), 'bricks-builder-context-menu' ),
+		'le menu contextuel est de retour : il se remplit trop tard pour être fiable'
+	);
+} );
+
+test( 'le « renommer » de Bricks est devancé', function (): void {
+	/*
+	 * Bricks lie déjà le double-clic de `.structure-item` à son mode « renommer ».
+	 * Sans arrêter l'événement, les deux comportements se superposent — c'est ce
+	 * qu'a donné le premier essai à l'usage.
+	 */
+	foreach ( [ 'preventDefault', 'stopPropagation', 'stopImmediatePropagation' ] as $garde ) {
+		assert_true( str_contains( code(), $garde ), "le double-clic ne fait pas de {$garde}" );
+	}
+} );
+
+test( 'la largeur est posée par la touche que Bricks écoute', function (): void {
+	/*
+	 * Le champ `#preview-width` n'est pas en `v-model` : relevé dans le rendu de
+	 * Bricks, il ne relit sa valeur que sur `blur` et sur `keyup` filtré par
+	 * Entrée. Émettre `input` posait la valeur dans le champ sans jamais
+	 * redimensionner le canevas — exactement ce qui a été constaté.
+	 */
+	assert_true( str_contains( code(), "key: 'Enter'" ), 'la touche Entrée n’est plus simulée' );
+	assert_true(
+		! str_contains( code(), "new Event('input'" ),
+		'un événement input est de retour : Bricks ne l’écoute pas sur ce champ'
+	);
+} );
+
+test( 'le curseur va du plus large au plus étroit', function (): void {
+	// C'est l'ordre dans lequel on conçoit — du bureau vers le mobile — et celui
+	// des points de rupture de Bricks. Le sens naturel d'un curseur ne l'est pas
+	// ici.
+	assert_true( str_contains( code(), 'miroir' ), 'l’inversion du curseur a disparu' );
+} );
+
+test( 'les repères sont les points de rupture du site, et suivent leurs changements', function (): void {
+	// Une liste écrite en dur mentirait dès qu'un site ajoute un point de rupture.
+	assert_true( str_contains( code(), 'bricksData?.breakpoints' ), 'les points de rupture ne sont plus lus sur le site' );
+	assert_true( str_contains( code(), 'dessinerReperes' ), 'les repères ne sont plus redessinés' );
+} );
+
+test( 'un champ verrouillé par Bricks est respecté', function (): void {
+	// La largeur du bureau peut être verrouillée : y écrire produirait une valeur
+	// que Bricks ignore, et un curseur qui ne correspond plus à ce qu'on voit.
+	assert_true( str_contains( code(), 'champ.readOnly' ), 'le verrou de largeur n’est plus consulté' );
 } );
 
 test( 'la dernière classe est prise, pas la première', function (): void {
@@ -355,6 +412,19 @@ test( 'la dernière classe est prise, pas la première', function (): void {
 	assert_true(
 		str_contains( script(), 'liste[liste.length - 1]' ),
 		'la sélection ne porte plus sur la dernière classe'
+	);
+} );
+
+test( 'un panneau encore vide n’est pas pris pour un élément sans classes', function (): void {
+	/*
+	 * Le défaut constaté à l'usage : la fonction ne marchait qu'à partir du
+	 * **deuxième** élément sélectionné. Le panneau se remplit après que la ligne
+	 * devient active ; retenir l'élément à cet instant le condamnait — on ne
+	 * repassait plus jamais dessus.
+	 */
+	assert_true(
+		str_contains( code(), 'if (!liste.length) return;' ),
+		'un panneau vide fait de nouveau oublier l’élément'
 	);
 } );
 
