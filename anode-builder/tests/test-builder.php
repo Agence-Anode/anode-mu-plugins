@@ -319,22 +319,29 @@ function code(): string {
 
 test( 'chaque sélecteur relevé est présent dans le script', function (): void {
 	/*
-	 * Ces cinq sélecteurs ont été relevés dans un builder Bricks 2.3.10, en
+	 * Ces six sélecteurs ont été relevés dans un builder Bricks 2.3.10, en
 	 * ouvrant une page qui contient un composant. Ce ne sont pas des suppositions
 	 * — et c'est pour cela qu'ils sont épinglés : une réécriture qui en perd un
 	 * rend une fonction inerte, sans erreur ni trace.
+	 *
+	 * La lecture porte sur `code()`, et non sur la source brute. Le défaut est
+	 * mesuré : `#bricks-structure li.element.active` avait disparu du code
+	 * exécutable en même temps que la notion d'« élément courant », et ne
+	 * subsistait que dans le commentaire d'en-tête. Le test passait au vert en ne
+	 * garantissant rien — un sélecteur cité en prose n'accroche rien.
 	 */
 	$attendus = [
-		'.active-classes li'                                       => 'les classes de l’élément',
-		'#bricks-toolbar input#preview-width'                      => 'la largeur du canevas',
-		'#bricks-structure li.element.active'                      => 'l’élément sélectionné',
-		'#bricks-structure li.element.component'                   => 'une ligne de composant',
-		'#bricks-panel span.bricks-svg-wrapper.component'          => 'le bouton d’édition du composant',
+		'.active-classes li'                               => 'les classes de l’élément',
+		'#bricks-toolbar input#preview-width'              => 'la largeur du canevas',
+		'#bricks-structure li.element[data-id]'            => 'les lignes de la structure',
+		'#bricks-structure li.element.active'              => 'la ligne sélectionnée',
+		'#bricks-structure li.element[data-parent-id="0"]' => 'le niveau de la page',
+		'#bricks-panel span.bricks-svg-wrapper.component'  => 'le bouton d’édition du composant',
 	];
 
 	foreach ( $attendus as $selecteur => $role ) {
 		assert_true(
-			str_contains( script(), $selecteur ),
+			str_contains( code(), $selecteur ),
 			sprintf( 'sélecteur perdu — %s : %s', $role, $selecteur )
 		);
 	}
@@ -452,28 +459,125 @@ test( 'aucune notion d’« élément courant » ne subsiste', function (): void
 	);
 } );
 
-test( 'rien n’est intercepté quand on est déjà dans un composant', function (): void {
+test( 'la décision porte sur la cible, pas sur le fait d’être dans un composant', function (): void {
 	/*
 	 * La cause des trois instabilités constatées, qui n'en faisaient qu'une.
 	 *
 	 * Le bouton du panneau ne veut pas dire « voici un composant à ouvrir » : le
-	 * rendu de Bricks l'affiche aussi pour un composant **imbriqué**, alors qu'on
-	 * est déjà en train d'éditer. Et `setActiveComponent` sur le composant courant
+	 * rendu de Bricks l'affiche dès que la sélection touche un composant, y compris
+	 * celui qu'on édite. Et `setActiveComponent` sur le composant courant
 	 * **bascule** — il fait sortir. D'où : on sortait sans savoir pourquoi, un
-	 * troisième clic éjectait, et sélectionner un élément imbriqué aussi.
+	 * troisième clic éjectait, et sélectionner un élément du composant aussi.
 	 *
-	 * Le repère est franc : au niveau de la page, des lignes de structure portent
-	 * `data-parent-id="0"` ; en édition de composant, plus aucune.
+	 * La première correction a répondu « suis-je dedans ? », et refusait d'agir
+	 * dans ce cas. C'était trop large : elle interdisait d'ouvrir un composant
+	 * **imbriqué**, qui est un cas prévu par le §4 du CLAUDE.md. La bonne question
+	 * est « la cible est-elle un composant *autre* que celui que j'édite ? ».
 	 */
-	assert_true( str_contains( code(), 'dansUnComposant' ), 'la garde a disparu' );
+	assert_true( str_contains( code(), 'const ouvrable = (ligne)' ), 'la décision par cible a disparu' );
+
+	// La garde en barrière est proscrite : c'est elle qui rendait l'imbrication
+	// impossible. Le mode d'édition ne doit servir qu'à *interpréter* la cible.
+	assert_true(
+		! str_contains( code(), 'if (dansUnComposant()) return;' ),
+		'la garde qui interdisait l’imbrication est de retour'
+	);
+	assert_same(
+		1,
+		substr_count( code(), 'enEditionDeComposant()' ),
+		'le mode d’édition est consulté ailleurs que dans la décision'
+	);
+
+	// Les deux gestionnaires passent par la même décision. N'en équiper qu'un
+	// laisserait la moitié du défaut — c'est exactement ce qui a été livré en 1.4.0
+	// pour le canevas, qui n'avait pas de notion de cible du tout.
+	assert_same( 2, substr_count( code(), 'ouvrable(' ), 'les deux gestionnaires ne décident pas de la même façon' );
+} );
+
+test( 'un composant imbriqué peut être ouvert, la racine de celui qu’on édite non', function (): void {
+	/*
+	 * Le repère est franc, et mesuré dans le builder : au niveau de la page, des
+	 * lignes de structure portent `data-parent-id="0"` ; en édition de composant,
+	 * plus aucune, et la racine affichée **est** le composant courant.
+	 *
+	 * D'où la règle : hors édition, tout composant s'ouvre — l'en-tête et le pied
+	 * de page sont des instances posées à la racine de la page (§4) ; en édition,
+	 * tout sauf la racine, qui rouvrirait le composant courant et donc en
+	 * sortirait.
+	 */
 	assert_true(
 		str_contains( code(), 'data-parent-id="0"' ),
 		'le repère de niveau de page n’est plus consulté'
 	);
 
-	// Deux gestionnaires, deux fois la garde : celui de la structure et celui du
-	// canevas. N'en protéger qu'un laisserait la moitié du défaut.
-	assert_same( 2, substr_count( code(), 'if (dansUnComposant()) return;' ), 'nombre de gardes' );
+	// Une racine se reconnaît à l'absence de ligne parente affichée. Refuser
+	// « toute racine » sans distinguer le mode rendrait l'en-tête inouvrable.
+	assert_true(
+		str_contains( code(), '!enEditionDeComposant() || ligneParente(ligne) !== null' ),
+		'la racine n’est plus distinguée du mode d’édition'
+	);
+
+	// Le parent se lit par identifiant, pas seulement par l'imbrication du DOM :
+	// une structure rendue à plat perdrait toute notion de racine.
+	assert_true( str_contains( code(), "getAttribute('data-parent-id')" ), 'le parent déclaré n’est plus lu' );
+} );
+
+test( 'double-cliquer un enfant ne remonte plus au composant qui le contient', function (): void {
+	/*
+	 * Le symptôme « juste sélectionner un élément présent dans le composant nous
+	 * fait quitter », vu depuis la structure : les lignes y sont imbriquées, et
+	 * `closest('#bricks-structure li.element.component')` depuis un enfant rendait
+	 * l'instance qui le porte. Un double-clic destiné au renommage d'une carte
+	 * ouvrait donc le composant — ou, en édition, en sortait.
+	 */
+	assert_true(
+		! str_contains( code(), '#bricks-structure li.element.component' ),
+		'la remontée au composant ancêtre est de retour dans la structure'
+	);
+
+	// La ligne visée est celle qu'on a cliquée, et sa qualité de composant se lit
+	// sur elle seule.
+	assert_true( str_contains( code(), 'closest?.(selecteurLigne)' ), 'la ligne cliquée n’est plus celle qu’on juge' );
+	assert_true( str_contains( code(), "classList.contains('component')" ), 'la qualité de composant n’est plus lue' );
+} );
+
+test( 'dans le canevas, c’est la sélection qui décide, jamais le seul bouton', function (): void {
+	/*
+	 * Le canevas n'a pas de ligne de structure sous le curseur : la 1.4.0 s'y
+	 * contentait donc de la présence du bouton, qui ne dit pas *quel* composant il
+	 * ouvrirait. En édition, il apparaît aussi pour le composant courant — et
+	 * l'ouvrir bascule, donc sort. C'est le troisième symptôme.
+	 *
+	 * On lit la ligne sélectionnée — le premier des deux clics l'a posée — puis on
+	 * remonte à l'instance qui la porte, et c'est la même décision qu'ailleurs.
+	 */
+	assert_true( str_contains( code(), 'ligneActive()' ), 'la sélection n’est plus lue depuis le canevas' );
+	assert_true(
+		str_contains( code(), 'ouvrable(composantPortant(active))' ),
+		'le canevas décide encore sur autre chose que sa sélection'
+	);
+
+	// Sans sélection lisible — structure repliée, panneau pas encore rendu — on ne
+	// sait pas sur quoi on agirait : on s'abstient plutôt que d'agir au hasard.
+	assert_true( str_contains( code(), 'if (!active) return;' ), 'le canevas agit sans savoir sur quoi' );
+} );
+
+test( 'le canevas ne coupe aucun geste', function (): void {
+	/*
+	 * Rien à devancer dans le canevas : Bricks n'y lie pas le double-clic au
+	 * renommage. Y couper l'événement casserait la sélection, le déplacement et
+	 * l'édition en place, pour rien. Le seul blocage légitime est celui de la
+	 * structure, qui devance le mode « renommer ».
+	 */
+	assert_same( 1, substr_count( code(), 'preventDefault' ), 'un blocage a été ajouté hors de la structure' );
+	assert_same( 1, substr_count( code(), 'stopImmediatePropagation' ), 'un blocage a été ajouté hors de la structure' );
+} );
+
+test( 'la remontée au composant portant est bornée', function (): void {
+	// Un `data-parent-id` incohérent — une ligne qui se déclare son propre parent
+	// le temps d'un glisser-déposer — ferait une boucle infinie dans le fil de
+	// l'interface : le builder se figerait sur un double-clic.
+	assert_true( str_contains( code(), 'profondeur < 50' ), 'la remontée n’est plus bornée' );
 } );
 
 test( 'trois clics rapides ne produisent qu’une seule action', function (): void {
