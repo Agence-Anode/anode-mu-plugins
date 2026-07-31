@@ -602,7 +602,49 @@ test( 'double-cliquer un enfant ne remonte pas au composant qui le contient', fu
 	);
 	assert_true(
 		str_contains( gestionnaire( 'structure' ), "ligne.classList.contains('component')" ),
-		'la garde de niveau de page a disparu : le bouton, en retard d’un rendu, rouvrirait le composant précédent'
+		'la garde de niveau de page a disparu — c’est le seul filet si le bouton se mettait à suivre la sélection'
+		. ' avec un rendu de retard ; ce qu’elle empêche est éprouvé par tests/test-decision.mjs'
+	);
+} );
+
+test( 'chaque garde dit où elle est éprouvée', function (): void {
+	/*
+	 * Le défaut du tour précédent, et il n'était pas dans le code : trois gardes de
+	 * `composant_dblclic` ont été retirées une à une du fichier servi par la
+	 * préproduction, et le harnais en ligne a rendu 53 cas verts à chaque fois. La
+	 * cause est unique — l'oracle du bouton tranche seul dans tous les états qu'un
+	 * vrai builder produit, parce que le bouton disparaît dans le même tour synchrone
+	 * que le changement de sélection. Les gardes protègent d'un Bricks qui n'existe
+	 * pas encore : aucun clic ne peut les atteindre.
+	 *
+	 * Elles sont donc éprouvées ailleurs, par un DOM de poche où l'état se pose au
+	 * lieu de s'attendre. Ce test tient le lien : une garde qui ne nomme pas son juge
+	 * est une garde que la prochaine réécriture supprimera sans rien casser.
+	 */
+	assert_true(
+		str_contains( script(), 'tests/test-decision.mjs' ),
+		'les gardes ne disent plus où elles sont éprouvées — c’est ce qui a laissé passer trois mutations silencieuses'
+	);
+
+	// Et la justification démentie ne revient pas. Elle affirmait que le bouton était
+	// « en retard d'un rendu de Vue sur le geste » : mesuré faux, à 0 ms puis sur
+	// 400 ms de relevé continu.
+	assert_true(
+		! str_contains( script(), 'en retard d’un rendu de Vue sur le geste' ),
+		'une mesure démentie est de retour dans les commentaires : c’est ce qu’on corrige, pas ce qu’on recopie'
+	);
+
+	// Le fichier de décision existe, et il exécute réellement le script — un chemin
+	// mort dans un commentaire vaudrait la garde qu'il prétend justifier.
+	$decision = __DIR__ . '/test-decision.mjs';
+
+	assert_true( file_exists( $decision ), 'tests/test-decision.mjs est nommé par le script mais absent' );
+
+	$source = (string) file_get_contents( $decision ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents
+
+	assert_true(
+		str_contains( $source, "monter(" ) && str_contains( $source, 'doublure-dom.mjs' ),
+		'le fichier de décision n’exécute plus le script : il ne prouverait rien'
 	);
 } );
 

@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Anode — confort du builder
  * Description: Trois manques de Bricks Builder, comblés sans extension tierce : la classe active reste sélectionnée, un curseur balaie les largeurs au pixel, et un double-clic ouvre un composant.
- * Version:     1.5.1
+ * Version:     1.5.2
  * Author:      Anode
  * Requires PHP: 8.1
  *

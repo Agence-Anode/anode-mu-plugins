@@ -22,6 +22,17 @@
  * `component` n'identifie une instance qu'au niveau de la page. Voir la fonction
  * 3, où ils coûtaient une garde qui ne gardait rien.
  *
+ * **Les trois gardes de la fonction 3 ne sont décisives dans aucun état que ce
+ * Bricks produit, et cela se dit ici plutôt que dans chacune.** Mesuré sur la
+ * préproduction : le bouton disparaît dans le même tour synchrone que le
+ * changement de sélection — absent dès le premier échantillon à 0 ms, et sur
+ * 400 ms de relevé continu. L'oracle du bouton tranche donc seul, partout, et les
+ * trois ont été retirées une à une du fichier servi sans qu'un seul des 53 cas de
+ * `bin/test-builder-interactions.mjs` bouge. Elles restent : ce sont les seuls
+ * filets si une version changeait cette synchronicité. Mais elles ne se prouvent
+ * pas dans un vrai builder — elles se prouvent dans
+ * `tests/test-decision.mjs`, qui pose l'état que Bricks ne produit pas.
+ *
  * Chaque fonction est isolée : celle qui échoue n'emporte pas les autres, et un
  * point d'accroche disparu la rend inerte plutôt que bruyante.
  */
@@ -384,7 +395,10 @@
      * borne de profondeur contre une boucle que celle-ci ne peut pas faire.
      *
      * Comme la classe `component`, cette lecture n'est fiable qu'au niveau de la
-     * page. C'est une garde, pas une décision : le bouton tranche.
+     * page. C'est une garde, pas une décision : le bouton tranche — et dans ce
+     * Bricks, il tranche seul. Retirée du fichier servi, elle ne fait bouger aucun
+     * cas du harnais en ligne ; c'est `tests/test-decision.mjs` qui l'éprouve, en
+     * posant une sélection hors instance avec le bouton affiché.
      */
     const dansUneInstance = (ligne) => ligne?.closest?.('#bricks-structure li.element.component') != null;
 
@@ -392,9 +406,15 @@
      * Un verrou de temps, en plus.
      *
      * Trois clics rapides produisent **deux** événements `dblclick` : les clics 1‑2,
-     * puis les clics 2‑3. Le second retombait sur notre gestionnaire à un moment où
-     * le panneau n'avait pas encore basculé, donc où le bouton était encore là. Le
-     * verrou avale ce second passage.
+     * puis les clics 2‑3. Le verrou avale le second passage.
+     *
+     * Ce qu'il faut savoir de lui : dans ce Bricks, il n'a jamais à intervenir.
+     * Mesuré en le neutralisant sur le fichier servi — le troisième clic ne ressort
+     * pas, parce que la racine qu'on vient d'ouvrir ne propose pas le bouton, et le
+     * second `dblclick` n'a donc rien à cliquer. Le garder est un choix : c'est le
+     * filet du jour où le panneau mettrait un rendu à basculer. Ce qui l'éprouve est
+     * `tests/test-decision.mjs`, où le panneau ne bascule pas et où deux ouvertures
+     * en 100 ms se produiraient sans lui.
      */
     let derniereAction = 0;
 
@@ -430,11 +450,20 @@
        * La ligne cliquée doit se déclarer instance — et cette garde sert au niveau
        * de la page, seul endroit où la classe est fiable.
        *
-       * Elle n'est pas redondante avec le bouton : le bouton reflète la
-       * **sélection**, qui est en retard d'un rendu de Vue sur le geste. Double-cliquer
-       * une ligne ordinaire juste après avoir sélectionné un composant trouverait
-       * donc le bouton encore affiché — et rouvrirait le composant précédent au lieu
-       * de renommer. C'est le cas « juste après un composant » du test en ligne.
+       * **Elle est redondante avec le bouton dans ce Bricks, et la version
+       * précédente affirmait le contraire.** Il était écrit ici que le bouton
+       * « reflète la sélection, en retard d'un rendu de Vue sur le geste », de sorte
+       * qu'un double-clic sur une ligne ordinaire juste après un composant le
+       * trouverait encore affiché. C'est faux, mesuré : après le clic sur la ligne
+       * ordinaire, le bouton est absent dès 0 ms et sur 400 ms de relevé continu. Il
+       * n'y a pas de fenêtre de péremption, et le cas du harnais écrit pour la
+       * prouver imprimait lui-même « bouton encore affiché : false ».
+       *
+       * Elle reste, et c'est un choix qui se dit : si une version de Bricks
+       * introduisait ce retard, elle serait le seul filet — deux états passeraient
+       * sinon, une ligne ordinaire et un enfant d'instance, et le renommage
+       * deviendrait une ouverture de composant. `tests/test-decision.mjs` pose ces
+       * deux états et tombe si on la retire ; le harnais en ligne, non.
        *
        * En édition de composant, la classe suit la sélection : la garde y laisse
        * tout passer, et c'est le bouton qui écarte la racine éditée et ses enfants.
@@ -490,9 +519,17 @@
 
         const active = ligneActive();
 
-        // Aucune sélection lisible — structure repliée, panneau pas encore rendu :
-        // on ne sait pas sur quoi on agirait, donc on s'abstient. Agir « au bouton »
-        // est ce qui a rendu la fonction nuisible.
+        /*
+         * Aucune sélection lisible — structure repliée, panneau pas encore rendu :
+         * on ne sait pas sur quoi on agirait, donc on s'abstient. Agir « au bouton »
+         * est ce qui a rendu la fonction nuisible en 1.4.0.
+         *
+         * Elle est **subsumée** par la ligne suivante, et le dire vaut mieux que
+         * laisser croire à une garde : `dansUneInstance(null)` rend déjà `false`.
+         * Aucun test ne peut donc distinguer sa présence de son absence — vérifié par
+         * mutation. Elle reste parce qu'elle énonce l'intention à l'endroit où on la
+         * lit, et parce qu'elle survivrait à une réécriture de `dansUneInstance`.
+         */
         if (!active) return;
 
         // La même garde que dans la structure, à ceci près que la sélection porte
