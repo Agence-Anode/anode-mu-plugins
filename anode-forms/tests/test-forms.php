@@ -2385,6 +2385,72 @@ function get_the_date( string $format = '', $post = null ): string {
 		}
 	);
 
+	/* --- Destination obligatoire ------------------------------------- */
+
+	echo "\nDestination obligatoire\n";
+
+	fixture(
+		'sans-destination',
+		[
+			'label'  => 'Formulaire non branché',
+			// Aucun `webhook` ni `webhooks` : l'état d'un blueprint neuf, et celui
+			// d'une mise en ligne où personne n'a renseigné l'adresse.
+			'fields' => [
+				[ 'name' => 'nom', 'label' => 'Nom', 'type' => 'text', 'required' => true ],
+			],
+		]
+	);
+
+	test(
+		'un formulaire sans webhook refuse l’envoi',
+		function (): void {
+			/*
+			 * Mesuré en ligne avant correction : statut 200 et « merci, votre
+			 * demande a bien été envoyée », pour une demande qui n'allait nulle
+			 * part — le site n'enregistre rien. La personne qui écrit à une
+			 * entreprise n'avait aucun moyen de s'en apercevoir.
+			 */
+			$refus = submit( [ 'nom' => 'Dupont' ], 'sans-destination' );
+
+			assert_true( is_wp_error( $refus ), 'l’envoi a été accepté' );
+			assert_same( 'anode_form_relay_failed', $refus->get_error_code(), 'code rendu' );
+			assert_same( 502, $refus->get_error_data()['status'] ?? null, 'statut rendu' );
+		}
+	);
+
+	test(
+		'le refus ne révèle rien de la configuration au visiteur',
+		function (): void {
+			// Le motif technique — « aucun webhook déclaré » — part au journal du
+			// serveur. Ce que lit la personne parle d'elle, pas de notre montage.
+			$message = submit( [ 'nom' => 'Dupont' ], 'sans-destination' )->get_error_message();
+
+			assert_true( ! str_contains( strtolower( $message ), 'webhook' ), 'le message parle du montage' );
+			assert_true( str_contains( $message, 'contactez-nous' ), 'aucune porte de sortie proposée' );
+		}
+	);
+
+	test(
+		'un webhook déclaré mais invalide est refusé de la même façon',
+		function (): void {
+			// La distinction reste dans le motif journalisé : elle change ce qu'il
+			// faut réparer, pas ce qu'il faut répondre.
+			fixture(
+				'destination-fautive',
+				[
+					'label'   => 'Adresse en clair',
+					'webhook' => 'http://relais.exemple.test/contact',
+					'fields'  => [ [ 'name' => 'nom', 'label' => 'Nom', 'type' => 'text', 'required' => true ] ],
+				]
+			);
+
+			$refus = submit( [ 'nom' => 'Dupont' ], 'destination-fautive' );
+
+			assert_true( is_wp_error( $refus ), 'une adresse en clair a été acceptée' );
+			assert_same( 502, $refus->get_error_data()['status'] ?? null, 'statut rendu' );
+		}
+	);
+
 	printf( "\n%d test(s) réussi(s), %d échec(s).\n", $passed, $failed );
 
 	exit( $failed > 0 ? 1 : 0 );

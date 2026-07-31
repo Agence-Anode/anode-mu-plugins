@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Anode — formulaires
  * Description: Réception, validation, stockage et notification des formulaires. Versant serveur du moteur assets/js/form-engine.js, en remplacement de l'élément « formulaire » de Bricks.
- * Version:     2.0.0
+ * Version:     3.0.0
  * Author:      Anode
  *
  * Pourquoi ne pas utiliser l'élément de Bricks : un seul écran, une validation
@@ -2585,14 +2585,34 @@ function relayer( string $name, array $definition, array $values, string $page, 
 	$urls = relais_declares( $definition );
 
 	if ( ! $urls ) {
-		// Aucune adresse retenue alors qu'il y en avait de déclarées : ce n'est
-		// pas « pas de webhook », c'est une déclaration fautive, et la taire
-		// ferait croire à un relais qui n'a jamais eu lieu.
+		/*
+		 * Aucune adresse : l'envoi est refusé, et c'est le seul comportement
+		 * tenable.
+		 *
+		 * Rendre `true` ici — ce que ce code faisait — acceptait la demande, ne
+		 * l'envoyait nulle part, puisque le site n'enregistre rien, et répondait
+		 * « merci, votre demande a bien été envoyée ». Mesuré en ligne sur une
+		 * préproduction : statut 200, message de succès, demande perdue. C'est
+		 * exactement le « merci, c'est envoyé » suivi d'un silence que le reste du
+		 * fichier s'attache à éviter, et la personne qui écrit à une entreprise
+		 * n'a aucun moyen de s'en apercevoir.
+		 *
+		 * Un blueprint neuf refuse donc ses formulaires jusqu'à ce qu'on les
+		 * branche. C'est visible tout de suite, et `wp_health` le nomme — au lieu
+		 * de se découvrir après la mise en ligne, sur une demande manquée.
+		 *
+		 * La distinction entre « rien de déclaré » et « déclaration fautive »
+		 * subsiste dans le motif, qui part au journal du serveur : elle change ce
+		 * qu'il faut réparer, pas ce qu'il faut répondre.
+		 */
 		$declare = isset( $definition['webhook'] ) || isset( $definition['webhooks'] );
 
-		return $declare
-			? new \WP_Error( 'anode_form_webhook', 'Aucune adresse de relais valable : HTTPS et nom d’hôte exigés.' )
-			: true;
+		return new \WP_Error(
+			'anode_form_webhook',
+			$declare
+				? 'Aucune adresse de relais valable : HTTPS et nom d’hôte exigés.'
+				: 'Aucun webhook déclaré : la demande n’a aucune destination, et le site n’enregistre rien.'
+		);
 	}
 
 	/*
