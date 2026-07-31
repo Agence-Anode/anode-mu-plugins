@@ -1,8 +1,8 @@
 <?php
 /**
  * Plugin Name: Anode — formulaires
- * Description: Réception, validation, stockage et notification des formulaires. Versant serveur du moteur assets/js/form-engine.js, en remplacement de l'élément « formulaire » de Bricks.
- * Version:     3.0.1
+ * Description: Réception, validation et relais des formulaires vers leurs webhooks — le site n'enregistre et ne notifie rien. Versant serveur du moteur assets/js/form-engine.js, en remplacement de l'élément « formulaire » de Bricks.
+ * Version:     3.1.0
  * Author:      Anode
  *
  * Pourquoi ne pas utiliser l'élément de Bricks : un seul écran, une validation
@@ -26,7 +26,15 @@ if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-const VERSION   = '1.7.0';
+/*
+ * Il n'y a pas de constante `VERSION`, et c'est voulu.
+ *
+ * Elle a existé, figée à « 1.7.0 » pendant que l'en-tête du fichier passait à
+ * 3.0.1 — et personne ne l'a vu, parce qu'aucune ligne du dépôt ne la lisait :
+ * c'est l'en-tête que `anode-updater` compare, c'est de lui que découlent le tag
+ * et le nom de l'archive. Un second numéro, faux et sans lecteur, est de la même
+ * famille que la clé `notify` que `clefs_inconnues()` refuse plus bas.
+ */
 
 /** Envois autorisés par heure et par adresse IP. */
 const RATE_LIMIT = 10;
@@ -63,6 +71,62 @@ const PUBLIC_KEYS = [
 	'submitIcon',
 	'redirect',
 ];
+
+/**
+ * Clés que seul le serveur lit, et qui ne sortent jamais vers le navigateur.
+ *
+ * `PUBLIC_KEYS` et celle-ci forment ensemble tout ce qu'une définition peut
+ * porter — voir `clefs_inconnues()`.
+ */
+const PRIVATE_KEYS = [
+	'honeypot',
+	'webhook',
+	'webhooks',
+];
+
+/**
+ * Les clés d'une définition que le moteur ne lit pas.
+ *
+ * Le moteur ignore en silence ce qu'il ne connaît pas, et ce silence a un coût
+ * mesuré. Quand le stockage des demandes a été retiré, l'envoi de courriel est
+ * parti avec — mais la clé qui portait le destinataire est restée dans les
+ * définitions d'un site client en préproduction :
+ *
+ *     "notify": "contact@niort-tech.fr"
+ *
+ * Deux formulaires annonçaient donc une adresse de destination que plus une
+ * ligne ne lisait (`grep -c wp_mail` rend 0), et rien ne pouvait le dire : ni
+ * le moteur, qui ignore, ni la sonde de santé, qui ne regardait que la présence
+ * d'un relais. Une clé morte qui *nomme une destination* est pire que son
+ * absence : elle se lit comme un formulaire branché.
+ *
+ * Un tiret bas initial marque la documentation (`_lisezmoi`) : elle non plus
+ * n'est lue par le moteur, mais elle ne prétend rien régler.
+ *
+ * Les clés numériques sont rendues, et non écartées : `json_decode` transforme
+ * `"0"` en entier, et le filtre `is_string()` qu'on écrit par réflexe laisserait
+ * passer en silence exactement ce qu'on cherche à faire remonter.
+ *
+ * @return list<string>
+ */
+function clefs_inconnues( array $definition ): array {
+	$connues   = array_merge( PUBLIC_KEYS, PRIVATE_KEYS );
+	$inconnues = [];
+
+	foreach ( array_keys( $definition ) as $clef ) {
+		$clef = (string) $clef;
+
+		if ( '' !== $clef && '_' === $clef[0] ) {
+			continue;
+		}
+
+		if ( ! in_array( $clef, $connues, true ) ) {
+			$inconnues[] = $clef;
+		}
+	}
+
+	return $inconnues;
+}
 
 /*
  * Il n'y a pas de durée de conservation, et c'est volontaire.

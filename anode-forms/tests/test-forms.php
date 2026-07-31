@@ -2529,6 +2529,85 @@ function get_the_date( string $format = '', $post = null ): string {
 		}
 	);
 
+	/* --- Réglages morts ---------------------------------------------- */
+
+	echo "\nRéglages morts dans une définition\n";
+
+	test(
+		'une clé que le moteur ne lit pas est nommée',
+		function (): void {
+			/*
+			 * Le défaut est mesuré, pas imaginé. `contact.json` et
+			 * `reservation.json` de Niort Tech — un site client en préproduction —
+			 * portaient encore « notify: contact@niort-tech.fr », restée là quand
+			 * l'envoi de courriel est parti avec le stockage des demandes.
+			 *
+			 * Les deux fichiers annonçaient donc un destinataire que plus une ligne
+			 * ne lisait, et les deux formulaires refusaient chaque envoi en 502.
+			 * Une clé morte qui *nomme une destination* se lit comme un formulaire
+			 * branché : c'est la pire forme de réglage mort.
+			 */
+			assert_same(
+				[ 'notify' ],
+				clefs_inconnues(
+					[
+						'label'   => 'Nous contacter',
+						'notify'  => 'contact@niort-tech.fr',
+						'webhook' => '',
+					]
+				),
+				'la clé morte n’est pas remontée'
+			);
+		}
+	);
+
+	test(
+		'la documentation préfixée d’un tiret bas est tolérée',
+		function (): void {
+			// `_lisezmoi` n'est pas lue davantage, mais elle ne prétend rien régler.
+			// La refuser reviendrait à interdire de commenter un fichier JSON, qui
+			// n'a pas d'autre moyen de l'être.
+			assert_same(
+				[],
+				clefs_inconnues( [ 'label' => 'X', '_lisezmoi' => [ 'note' ], 'webhook' => '' ] ),
+				'une clé de documentation a été refusée'
+			);
+		}
+	);
+
+	test(
+		'une clé numérique est remontée, et non écartée en silence',
+		function (): void {
+			/*
+			 * `json_decode` transforme "0" en entier : le filtre `is_string()`
+			 * qu'on écrit par réflexe laisserait passer sans rien dire exactement
+			 * ce qu'on cherche à faire remonter. Le piège est nommé dans le
+			 * CLAUDE.md du dépôt, et il s'applique ici comme ailleurs.
+			 */
+			assert_same( [ '0' ], clefs_inconnues( [ 0 => 'perdue', 'webhook' => '' ] ), 'clé numérique avalée' );
+		}
+	);
+
+	test(
+		'aucune définition livrée avec le blueprint ne porte de réglage mort',
+		function (): void {
+			// Le contrôle porte sur les fichiers réellement livrés : c'est là que
+			// la clé morte a survécu, pas dans un cas de figure inventé.
+			$fautives = [];
+
+			foreach ( glob( __DIR__ . '/../../../theme/*/forms/*.json' ) ?: [] as $fichier ) {
+				$definition = json_decode( (string) file_get_contents( $fichier ), true );
+				$inconnues  = is_array( $definition ) ? clefs_inconnues( $definition ) : [];
+
+				if ( $inconnues ) {
+					$fautives[] = basename( $fichier ) . ' (' . implode( ', ', $inconnues ) . ')';
+				}
+			}
+
+			assert_same( [], $fautives, 'réglage(s) mort(s) livré(s)' );
+		}
+	);
+
 	printf( "\n%d test(s) réussi(s), %d échec(s).\n", $passed, $failed );
 
 	exit( $failed > 0 ? 1 : 0 );
