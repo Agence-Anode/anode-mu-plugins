@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Anode — mises à jour
  * Description: Tient à jour les mu-plugins maison depuis leurs dépôts GitHub. Vérifie chaque jour, applique les correctifs et les versions mineures, retient les majeures.
- * Version:     1.6.0
+ * Version:     1.6.1
  * Author:      Anode
  * Requires PHP: 8.1
  *
