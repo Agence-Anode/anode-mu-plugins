@@ -18,7 +18,7 @@ Chaque release publie :
 <composant>-<version>.zip.sig       sa signature Ed25519, si le parc est armé
 ```
 
-Les tags sont préfixés par le composant — `anode-cache-v1.2.0` — parce que
+Les tags sont préfixés par le composant — `anode-seo-v1.3.0` — parce que
 ce dépôt en héberge plusieurs.
 
 ## Installation manuelle

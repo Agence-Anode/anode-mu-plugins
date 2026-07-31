@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Anode — formulaires
  * Description: Réception, validation, stockage et notification des formulaires. Versant serveur du moteur assets/js/form-engine.js, en remplacement de l'élément « formulaire » de Bricks.
- * Version:     3.0.0
+ * Version:     3.0.1
  * Author:      Anode
  *
  * Pourquoi ne pas utiliser l'élément de Bricks : un seul écran, une validation
@@ -64,14 +64,19 @@ const PUBLIC_KEYS = [
 	'redirect',
 ];
 
-/**
- * Durée de conservation par défaut d'une demande, en jours.
+/*
+ * Il n'y a pas de durée de conservation, et c'est volontaire.
  *
- * Trois ans : la durée annoncée aux visiteurs sous la case de consentement.
- * Une définition peut la réduire avec sa propre clé « retention » ; elle ne
- * peut pas l'allonger sans que la mention affichée soit corrigée d'autant.
+ * Une constante `RETENTION = 1095` vivait ici, avec le commentaire « trois ans,
+ * la durée annoncée aux visiteurs ». Plus rien ne la lisait depuis que le site
+ * a cessé d'enregistrer les demandes, et sa seule clé de réduction
+ * (« retention » dans une définition) n'était plus branchée nulle part.
+ *
+ * La laisser était pire que la retirer : elle donnait à relire une politique de
+ * conservation à un composant qui ne conserve rien, et c'est sur elle que
+ * s'appuyait la mention affichée sous la case de consentement — « effacées au
+ * bout de trois ans » — qui était donc fausse.
  */
-const RETENTION = 1095;
 
 /**
  * Extensions recevables en pièce jointe, et le type MIME que le contenu doit
@@ -2579,7 +2584,8 @@ function relais_declares( array $definition ): array {
  * Succès dès qu'**un** destinataire a répondu : deux scénarios branchés sur le
  * même formulaire ne doivent pas se rendre l'un l'autre indisponibles.
  *
- * @return true|\WP_Error true si aucun relais n'est déclaré, ou si l'un a répondu.
+ * @return true|\WP_Error true dès qu'un destinataire a répondu ; une erreur si
+ *                        aucun relais n'est déclaré, ou si tous ont échoué.
  */
 function relayer( string $name, array $definition, array $values, string $page, array $fichiers = [] ) {
 	$urls = relais_declares( $definition );
@@ -2789,77 +2795,40 @@ function consent_proof( string $name, array $definition, array $values ): array 
 }
 
 /* ------------------------------------------------------------------ */
-/* Effacement                                                          */
+/* Effacement — le reliquat de l'époque où le site conservait          */
 /* ------------------------------------------------------------------ */
 
 /*
- * Une durée de conservation qu'aucun code n'applique n'est pas une durée de
- * conservation : c'est une phrase. Le formulaire promet au visiteur que ses
- * données sont effacées au bout de trois ans — voici ce qui le fait.
+ * Il n'y a plus rien à effacer : depuis la 3.0.0, aucune demande n'est
+ * enregistrée. Ce qui restait ici — purge à échéance, écran d'administration,
+ * branchement aux outils RGPD du noyau — n'avait plus d'objet.
+ *
+ * Un morceau, lui, tournait encore, et il cassait :
+ *
+ *     add_action( 'anode/forms/purge', __NAMESPACE__ . '\\purge' );
+ *
+ * La fonction `purge()` était partie avec le stockage, le planificateur non.
+ * Chaque jour, sur chaque site, WP-Cron déclenchait l'événement et tombait sur
+ * un rappel introuvable. Mesuré le 31/07/2026 sur le site du parc :
+ *
+ *     Fatal error: Uncaught TypeError: call_user_func_array():
+ *     Argument #1 ($callback) must be a valid callback,
+ *     function "Anode\Forms\purge" not found
+ *
+ * Un cron qui meurt emporte les tâches planifiées après lui dans le même
+ * passage : mises à jour des composants, vidages de cache. Et rien ne le
+ * signalait — `wp_health` sonde les formulaires, pas le planificateur.
+ *
+ * D'où le nettoyage ci-dessous, qui ne se contente pas de ne plus planifier :
+ * l'événement déjà inscrit reste dans la base des sites existants, et il faut
+ * l'en retirer une fois. La garde `wp_next_scheduled()` rend l'opération
+ * inoffensive dès le second passage.
  */
 add_action(
 	'init',
 	static function (): void {
-		if ( ! wp_next_scheduled( 'anode/forms/purge' ) ) {
-			wp_schedule_event( time() + HOUR_IN_SECONDS, 'daily', 'anode/forms/purge' );
+		if ( wp_next_scheduled( 'anode/forms/purge' ) ) {
+			wp_clear_scheduled_hook( 'anode/forms/purge' );
 		}
 	}
 );
-
-add_action( 'anode/forms/purge', __NAMESPACE__ . '\\purge' );
-
-/**
- * Efface les demandes dont la durée de conservation est écoulée.
- *
- * Suppression forcée : passer par la corbeille laisserait les données trente
- * jours de plus, et « à la corbeille » n'est pas « effacé ».
- *
- * @return int Nombre de demandes effacées.
- */
-
-/* ------------------------------------------------------------------ */
-/* Administration                                                      */
-/* ------------------------------------------------------------------ */
-
-/** Les valeurs reçues s'affichent sur la fiche, sans avoir à fouiller. */
-
-/* ------------------------------------------------------------------ */
-/* RGPD — droit d'accès et droit à l'effacement                        */
-/* ------------------------------------------------------------------ */
-
-/**
- * Les demandes reçues rejoignent les outils du noyau.
- *
- * WordPress offre déjà l'écran « Outils › Exporter les données personnelles » et
- * son pendant pour l'effacement : ils rassemblent, pour une adresse donnée, ce
- * que chaque extension déclare détenir. Une extension qui ne s'y déclare pas
- * laisse ses données **invisibles** à la procédure — et le site répond alors à
- * une demande d'accès en oubliant la moitié de ce qu'il conserve.
- *
- * Sans cela, le RGPD (articles 15 et 17) était tenu à moitié : le consentement
- * était prouvé et la purge à échéance assurée, mais une personne qui demandait
- * copie ou effacement de ses données n'obtenait rien.
- *
- * L'appariement se fait sur les champs de type `email` de chaque demande — c'est
- * la seule donnée qui identifie la personne dans ce que nous stockons.
- *
- * @param string $email Adresse recherchée.
- * @param int    $page  Page, à partir de 1.
- * @return array<int, \WP_Post>
- */
-/**
- * Le lot lu à chaque passage. La valeur est partagée par les deux appelants :
- * c'est elle qui décide si une page est pleine, donc s'il en reste une autre.
- */
-const LOT_RGPD = 50;
-
-
-
-/**
- * @return array{data: array<int, array<string, mixed>>, done: bool}
- */
-
-
-/**
- * @return array{items_removed: bool, items_retained: bool, messages: array<int, string>, done: bool}
- */

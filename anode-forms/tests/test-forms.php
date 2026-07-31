@@ -2451,6 +2451,84 @@ function get_the_date( string $format = '', $post = null ): string {
 		}
 	);
 
+	/* --- Ce que le composant branche au noyau ------------------------- */
+
+	echo "\nCrochets branchés\n";
+
+	/*
+	 * Ce contrôle vient d'un défaut qui a tourné en production, tous les jours,
+	 * sans que rien ne le dise.
+	 *
+	 * La 3.0.0 a retiré le stockage des demandes, et avec lui la fonction
+	 * `purge()`. Le planificateur qui l'appelait, lui, est resté :
+	 *
+	 *     add_action( 'anode/forms/purge', __NAMESPACE__ . '\\purge' );
+	 *
+	 * Chaque nuit, WP-Cron déclenchait l'événement et tombait sur un rappel
+	 * introuvable. Mesuré le 31/07/2026 sur le site du parc, par
+	 * « wp cron event run anode/forms/purge » :
+	 *
+	 *     Fatal error: Uncaught TypeError: call_user_func_array():
+	 *     Argument #1 ($callback) must be a valid callback,
+	 *     function "Anode\Forms\purge" not found
+	 *
+	 * Aucun test ne pouvait le voir : ils éprouvent tous ce que le composant
+	 * *fait* quand on l'appelle, jamais ce qu'il *déclare* au noyau. Or une
+	 * suppression de code laisse précisément des déclarations orphelines.
+	 */
+	test(
+		'chaque rappel enregistré existe vraiment',
+		function (): void {
+			$orphelins = [];
+
+			foreach ( [ 'anode_forms_actions', 'anode_forms_filters' ] as $registre ) {
+				foreach ( $GLOBALS[ $registre ] ?? [] as $crochet => $rappels ) {
+					foreach ( $rappels as $rappel ) {
+						if ( is_callable( $rappel ) ) {
+							continue;
+						}
+
+						$orphelins[] = sprintf(
+							'%s → %s',
+							$crochet,
+							is_string( $rappel ) ? $rappel : gettype( $rappel )
+						);
+					}
+				}
+			}
+
+			assert_true(
+				[] === $orphelins,
+				'rappel(s) introuvable(s) : ' . implode( ', ', $orphelins )
+					. ' — une suppression de code a laissé le branchement derrière elle'
+			);
+		}
+	);
+
+	test(
+		'plus aucun événement planifié ne survit au retrait du stockage',
+		function (): void {
+			/*
+			 * Le sens est inverse du test précédent : là on vérifie qu'un rappel
+			 * existe, ici qu'on ne *replanifie* plus rien. Un composant qui ne
+			 * conserve rien n'a pas de purge à faire courir, et l'événement laissé
+			 * dans la base des sites déjà installés doit être retiré, pas réinscrit.
+			 */
+			$planifies = [];
+
+			foreach ( $GLOBALS['anode_forms_actions'] ?? [] as $crochet => $rappels ) {
+				if ( str_contains( $crochet, 'purge' ) ) {
+					$planifies[] = $crochet;
+				}
+			}
+
+			assert_true(
+				[] === $planifies,
+				'crochet(s) de purge encore branché(s) : ' . implode( ', ', $planifies )
+			);
+		}
+	);
+
 	printf( "\n%d test(s) réussi(s), %d échec(s).\n", $passed, $failed );
 
 	exit( $failed > 0 ? 1 : 0 );
