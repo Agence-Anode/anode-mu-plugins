@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Anode — SEO
  * Description: Titres, méta descriptions, URL canoniques, robots et cartes sociales, pilotables par l'API REST. Remplace Yoast pour un site vitrine.
- * Version:     1.3.0
+ * Version:     1.3.1
  * Author:      Anode
  *
  * Pourquoi une extension maison plutôt que Yoast : un site construit ici n'a
@@ -27,8 +27,6 @@ if ( ! defined( 'ABSPATH' ) ) {
 }
 
 final class Seo {
-
-	public const VERSION = '1.2.0';
 
 	/** Préfixe commun aux métadonnées, protégées par le tiret bas initial. */
 	public const PREFIX = '_anode_seo_';
