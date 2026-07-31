@@ -33,6 +33,14 @@
  * pas dans un vrai builder — elles se prouvent dans
  * `tests/test-decision.mjs`, qui pose l'état que Bricks ne produit pas.
  *
+ * **Une quatrième abstention a été retirée, et la distinction vaut d'être tenue.**
+ * Le canevas commençait par `if (!active) return;` avant de remonter à l'instance.
+ * Les trois gardes ci-dessus se prouvent quelque part ; celle-là, nulle part —
+ * `dansUneInstance(null)` rend déjà `false`, et aucune mesure, dans aucun DOM, ne
+ * peut distinguer sa présence de son absence. Un filet se choisit ; une branche
+ * qu'aucun test n'atteint se lit seulement comme un filet. L'intention est donc
+ * énoncée à l'endroit où on la lit, sans code pour la mimer.
+ *
  * Chaque fonction est isolée : celle qui échoue n'emporte pas les autres, et un
  * point d'accroche disparu la rend inerte plutôt que bruyante.
  */
@@ -517,26 +525,27 @@
       fenetre.document.addEventListener('dblclick', (evenement) => {
         if (evenement.target.closest?.('input, textarea, [contenteditable="true"]')) return;
 
-        const active = ligneActive();
-
         /*
-         * Aucune sélection lisible — structure repliée, panneau pas encore rendu :
-         * on ne sait pas sur quoi on agirait, donc on s'abstient. Agir « au bouton »
-         * est ce qui a rendu la fonction nuisible en 1.4.0.
+         * Une seule condition, et deux raisons de s'abstenir tenues par elle.
          *
-         * Elle est **subsumée** par la ligne suivante, et le dire vaut mieux que
-         * laisser croire à une garde : `dansUneInstance(null)` rend déjà `false`.
-         * Aucun test ne peut donc distinguer sa présence de son absence — vérifié par
-         * mutation. Elle reste parce qu'elle énonce l'intention à l'endroit où on la
-         * lit, et parce qu'elle survivrait à une réécriture de `dansUneInstance`.
+         * La sélection porte sur l'élément cliqué, pas sur l'instance : on remonte.
+         * Au niveau de la page, cela écarte un double-clic ordinaire sur un texte ou
+         * une image ; en édition, la lecture laisse passer, et c'est le bouton qui
+         * tranche.
+         *
+         * Et **aucune sélection lisible** — structure repliée, panneau pas encore
+         * rendu — s'y range : `dansUneInstance(null)` rend `false`, donc on
+         * s'abstient au lieu d'agir « au bouton » sans savoir sur quoi, ce qui est
+         * exactement ce qui a rendu la fonction nuisible en 1.4.0.
+         *
+         * Un `if (!ligneActive()) return` séparé a précédé celle-ci. Il énonçait
+         * cette seconde raison à l'endroit où on la lit, mais aucun test ne pouvait
+         * distinguer sa présence de son absence — vérifié par mutation, il était la
+         * seule des dix à ne faire tomber aucun cas. Une branche qu'aucune mesure
+         * n'atteint n'est pas un filet : c'est du code qu'on croit éprouvé. Elle est
+         * donc dite ici plutôt qu'écrite deux fois.
          */
-        if (!active) return;
-
-        // La même garde que dans la structure, à ceci près que la sélection porte
-        // sur l'élément et non sur l'instance : on remonte. Au niveau de la page,
-        // elle écarte un double-clic ordinaire sur un texte ou une image ; en
-        // édition, elle laisse passer, et c'est le bouton qui tranche.
-        if (!dansUneInstance(active)) return;
+        if (!dansUneInstance(ligneActive())) return;
 
         const bouton = boutonDuPanneau();
 

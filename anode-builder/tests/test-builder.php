@@ -662,13 +662,28 @@ test( 'le canevas part de la sélection, et s’abstient sans elle', function ()
 
 	assert_true( str_contains( $canevas, 'ligneActive()' ), 'la sélection n’est plus lue depuis le canevas' );
 	assert_true(
-		str_contains( $canevas, 'dansUneInstance(active)' ),
+		str_contains( $canevas, 'if (!dansUneInstance(ligneActive())) return;' ),
 		'le canevas n’écarte plus un double-clic sur un élément hors composant'
 	);
 
-	// Sans sélection lisible — structure repliée, panneau pas encore rendu — on ne
-	// sait pas sur quoi on agirait : on s'abstient plutôt que d'agir au hasard.
-	assert_true( str_contains( $canevas, 'if (!active) return;' ), 'le canevas agit sans savoir sur quoi' );
+	/*
+	 * **Une seule condition, et c'est un correctif de couverture.**
+	 *
+	 * Un `if (!active) return;` séparé la précédait, pour dire l'abstention sans
+	 * sélection lisible — structure repliée, panneau pas encore rendu. Il était
+	 * strictement inerte : `dansUneInstance(null)` rend déjà `false`. Retiré du
+	 * fichier servi, il ne faisait tomber aucun cas, ni en ligne ni dans le DOM de
+	 * poche — la seule des dix mutations à ne rien casser.
+	 *
+	 * On ne garde donc pas une branche qu'aucune mesure n'atteint : elle se lirait
+	 * comme un filet éprouvé alors qu'elle n'est rien. Ce test interdit son retour,
+	 * et le commentaire du script porte l'intention à sa place.
+	 */
+	assert_true(
+		! str_contains( $canevas, 'if (!active) return;' ),
+		'une branche inerte est de retour dans le canevas : dansUneInstance(null) rend déjà false, aucune mesure'
+		. ' ne la distingue de son absence'
+	);
 
 	// Et il lit le bouton, comme la structure : c'est lui qui tranche des deux côtés.
 	assert_true( str_contains( $canevas, 'boutonDuPanneau()' ), 'le canevas ne consulte plus le bouton' );
