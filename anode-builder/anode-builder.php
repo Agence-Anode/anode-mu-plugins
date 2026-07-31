@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Anode — confort du builder
  * Description: Trois manques de Bricks Builder, comblés sans extension tierce : la classe active reste sélectionnée, un curseur balaie les largeurs au pixel, et un double-clic ouvre un composant.
- * Version:     1.2.0
+ * Version:     1.3.0
  * Author:      Anode
  * Requires PHP: 8.1
  *
@@ -58,6 +58,19 @@ const FONCTIONS = [
 	'composant_dblclic'  => 'Double-clic sur un composant pour l’ouvrir.',
 ];
 
+/**
+ * Les fonctions actives sans réglage.
+ *
+ * Les trois sont actives. Le tableau existe pour qu'un site puisse en couper une
+ * par le filtre `anode/builder/fonctions`, et pour que le défaut de chacune soit
+ * lisible en un endroit plutôt que déduit d'un `array_fill_keys`.
+ */
+const DEFAUTS = [
+	'classe_active'      => true,
+	'curseur_largeur'    => true,
+	'composant_dblclic'  => true,
+];
+
 /** Chemin du dossier des ressources. */
 function dossier_assets(): string {
 	return __DIR__ . '/assets';
@@ -89,7 +102,7 @@ function version_asset( string $fichier ): string {
  * @return array<string, bool>
  */
 function fonctions_actives(): array {
-	$defaut = array_fill_keys( array_keys( FONCTIONS ), true );
+	$defaut = DEFAUTS;
 
 	/**
 	 * Permet de couper une fonction par site.

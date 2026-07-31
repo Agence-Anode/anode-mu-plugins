@@ -104,7 +104,6 @@
    */
   const classeActive = () => {
     const laissees = new Set();
-    let dernierElement = null;
 
     const pastilles = () => [...document.querySelectorAll('.active-classes li')]
       .filter((li) => li.matches('[data-class-id]') || li.querySelector('[data-class-id]'));
@@ -114,71 +113,48 @@
       ?? '';
 
     /**
-     * Ce qui identifie « l'élément qu'on regarde », sans le panneau de structure.
+     * Aucune notion d'« élément courant », et c'est le correctif.
      *
-     * La première version prenait le `data-id` de `#bricks-structure li.active`.
-     * Elle marchait à la souris dans la structure et **pas** dans le canevas : là,
-     * la ligne correspondante peut n'être pas rendue du tout — panneau replié,
-     * parent fermé — et la clé valait alors `null`, donc rien ne se passait. C'est
-     * ce qui donnait « ça ne marche qu'à partir du deuxième élément » : le
-     * deuxième clic tombait sur une structure entre-temps déployée.
+     * Les deux versions précédentes essayaient de savoir *quel* élément on
+     * regardait, pour n'agir qu'une fois par élément : d'abord par la ligne active
+     * de la structure, puis avec un repli sur la liste des classes. Les deux
+     * échouaient de la même façon à l'usage — « ça ne marche qu'à partir du
+     * deuxième élément » —, parce que l'identité de l'élément et l'arrivée des
+     * pastilles dans le panneau ne sont pas simultanées : au premier passage, on
+     * retenait un élément dont la liste n'était pas encore là, et on ne repassait
+     * plus.
      *
-     * On se rabat donc sur la liste des classes elle-même, qui existe dès qu'un
-     * élément est sélectionné, d'où qu'on l'ait sélectionné. La structure reste
-     * consultée quand elle est là : elle distingue deux éléments qui portent
-     * exactement les mêmes classes.
+     * La question « quel élément ? » n'a en réalité pas à être posée. La règle
+     * tient en une phrase : **s'il y a des classes et qu'aucune n'est active, on
+     * active la dernière.** C'est vrai au premier élément comme au centième, quel
+     * que soit l'endroit d'où l'on a sélectionné, et c'est idempotent — une fois la
+     * classe active, la condition est fausse et l'on ne fait plus rien.
+     *
+     * Reste le seul cas où il faut s'abstenir : l'utilisateur a désactivé la
+     * classe **volontairement**, pour styler l'`id`. On retient alors ce jeu de
+     * classes précis, et on ne le contrarie plus.
      */
-    const elementCourant = () => {
-      const parLaStructure = document
-        .querySelector('#bricks-structure li.element.active')
-        ?.getAttribute('data-id');
-
-      if (parLaStructure) return parLaStructure;
-
-      const liste = pastilles();
-
-      return liste.length ? liste.map(identifiantDe).join('|') : null;
-    };
-
     const activer = () => {
-      const element = elementCourant();
-
-      if (element === null || element === dernierElement) return;
-
       const liste = pastilles();
 
-      /*
-       * Une liste vide ne veut pas dire « pas de classes ».
-       *
-       * Le panneau se remplit **après** que la ligne devient active : au premier
-       * élément d'une session, l'observateur nous appelle avant que les pastilles
-       * n'existent. Retenir l'élément à cet instant le condamnait — on ne
-       * repassait plus jamais dessus. Symptôme mesuré côté utilisateur : la
-       * fonction ne marchait qu'à partir du **deuxième** élément sélectionné.
-       *
-       * On ne retient donc que ce qu'on a réellement pu traiter. L'observateur
-       * nous rappellera au rendu suivant, cette fois avec la liste.
-       */
       if (!liste.length) return;
-
-      dernierElement = element;
-
-      if (laissees.has(element)) return;
       if (liste.some((li) => li.classList.contains('active'))) return;
+
+      const cle = liste.map(identifiantDe).join('|');
+
+      if (laissees.has(cle)) return;
 
       cliquer(liste[liste.length - 1]);
     };
 
-    // Une désélection volontaire se reconnaît à ceci : le clic porte sur une
+    // Une désactivation volontaire se reconnaît à ceci : le clic porte sur une
     // pastille déjà active. Bricks la désactive alors, et nous devons l'accepter.
     document.addEventListener('click', (evenement) => {
       const pastille = evenement.target.closest?.('.active-classes li');
 
       if (!pastille || !pastille.classList.contains('active')) return;
 
-      const element = elementCourant();
-
-      if (element !== null) laissees.add(element);
+      laissees.add(pastilles().map(identifiantDe).join('|'));
     }, true);
 
     const observateur = new MutationObserver(() => activer());
@@ -379,20 +355,27 @@
       // Un champ en cours d'édition : le double-clic y sélectionne un mot.
       if (evenement.target.closest('input, textarea, [contenteditable="true"]')) return;
 
-      // Devance le « renommer » de Bricks, posé sur le même geste.
+      /*
+       * On ne devance Bricks **que** si l'on a réellement quelque chose à ouvrir.
+       *
+       * La version précédente coupait le geste d'abord et cherchait le bouton
+       * ensuite. Résultat, mesuré à l'usage : une fois **dans** un composant, il
+       * n'y a plus de composant à ouvrir, mais la ligne racine porte toujours la
+       * classe `component` — le renommage au double-clic était donc supprimé sans
+       * rien offrir en échange. Le builder devenait moins utilisable qu'avant.
+       *
+       * Le bouton est le seul juge : présent, on l'ouvre ; absent, on laisse
+       * Bricks renommer. Et il est déjà là au moment du double-clic, puisque le
+       * premier des deux clics a sélectionné la ligne — d'où la lecture
+       * synchrone, sans attente qui laisserait le renommage démarrer.
+       */
+      const bouton = boutonDuPanneau();
+
+      if (!bouton) return;
+
       evenement.preventDefault();
       evenement.stopPropagation();
       evenement.stopImmediatePropagation();
-
-      // Le bouton n'existe que pour le composant sélectionné : on s'assure que
-      // c'est bien celui qu'on vient de double-cliquer.
-      const item = ligne.querySelector('.structure-item');
-
-      if (item) cliquer(item);
-
-      const bouton = await patienter(boutonDuPanneau, 1200);
-
-      if (!bouton) return;
 
       cliquer(bouton);
     }, true);
@@ -412,10 +395,13 @@
 
       fenetre.document.anodeBuilderEcoute = true;
 
-      fenetre.document.addEventListener('dblclick', async (evenement) => {
+      fenetre.document.addEventListener('dblclick', (evenement) => {
         if (evenement.target.closest?.('input, textarea, [contenteditable="true"]')) return;
 
-        const bouton = await patienter(boutonDuPanneau, 1200);
+        // Même règle que dans la structure : le bouton décide, et rien n'est
+        // bloqué en son absence. C'est ce qui rend la sélection et le
+        // déplacement dans le canevas intacts une fois entré dans un composant.
+        const bouton = boutonDuPanneau();
 
         if (!bouton) return;
 

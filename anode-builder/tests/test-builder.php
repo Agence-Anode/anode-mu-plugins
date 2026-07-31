@@ -428,22 +428,47 @@ test( 'un panneau encore vide n’est pas pris pour un élément sans classes', 
 	);
 } );
 
-test( 'l’élément est identifié même sans le panneau de structure', function (): void {
+test( 'aucune notion d’« élément courant » ne subsiste', function (): void {
 	/*
-	 * Le défaut constaté deux fois de suite à l'usage. La clé venait du `data-id`
-	 * de la ligne active de la structure : elle existe quand on sélectionne
-	 * **dans** la structure, et pas forcément quand on sélectionne dans le
-	 * canevas — panneau replié, parent fermé, la ligne n'est pas rendue. La clé
-	 * valait alors `null`, et rien ne se passait ; au clic suivant la structure
-	 * s'était déployée, d'où « ça ne marche qu'à partir du deuxième élément ».
+	 * Le défaut constaté trois fois de suite : « ça ne marche qu'à partir du
+	 * deuxième élément ». Deux tentatives ont cherché à savoir *quel* élément on
+	 * regardait — la ligne active de la structure, puis un repli sur la liste des
+	 * classes — et les deux ont échoué pour la même raison : l'identité de
+	 * l'élément et l'arrivée des pastilles dans le panneau ne sont pas
+	 * simultanées, donc le premier passage retenait un élément sans liste et l'on
+	 * ne repassait plus.
+	 *
+	 * La question n'avait pas à être posée. La règle est sans état : s'il y a des
+	 * classes et qu'aucune n'est active, on active la dernière. Ce test interdit
+	 * le retour du suivi d'élément, qui est la forme même du défaut.
 	 */
 	assert_true(
-		str_contains( code(), 'parLaStructure' ),
-		'la structure n’est plus un simple raffinement de la clé'
+		! str_contains( code(), 'dernierElement' ),
+		'le suivi d’élément est de retour : c’est ce qui cassait le premier clic'
 	);
 	assert_true(
-		str_contains( code(), 'liste.map(identifiantDe)' ),
-		'il n’y a plus de repli sur la liste des classes'
+		! str_contains( code(), 'elementCourant' ),
+		'la notion d’élément courant est de retour'
+	);
+} );
+
+test( 'le double-clic ne devance Bricks que s’il a de quoi ouvrir', function (): void {
+	/*
+	 * La régression la plus grave de cette série : couper le geste d'abord et
+	 * chercher le bouton ensuite. Une fois **dans** un composant il n'y a plus rien
+	 * à ouvrir, mais la ligne racine porte toujours `component` — le renommage au
+	 * double-clic disparaissait sans rien en échange, et le canevas devenait
+	 * inerte. Le bouton doit être lu **avant** de bloquer quoi que ce soit.
+	 */
+	$corps = code();
+	$position_bouton = strpos( $corps, 'const bouton = boutonDuPanneau();' );
+	$position_blocage = strpos( $corps, 'evenement.preventDefault();' );
+
+	assert_true( false !== $position_bouton, 'la lecture synchrone du bouton a disparu' );
+	assert_true( false !== $position_blocage, 'le blocage a disparu' );
+	assert_true(
+		$position_bouton < $position_blocage,
+		'le geste est encore bloqué avant de savoir s’il y a un composant à ouvrir'
 	);
 } );
 
