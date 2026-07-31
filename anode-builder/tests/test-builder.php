@@ -12,8 +12,22 @@
  * ce sont des sélecteurs relevés dans un builder réel, et le jour où l'un
  * disparaît, la fonction devient inerte en silence. Les tests les épinglent, de
  * sorte qu'une réécriture distraite du script échoue ici plutôt que chez le
- * client. Ils ne prouvent pas que Bricks les émet encore — cela demande un vrai
- * builder, et c'est le rôle de `./bin/test-interactions.mjs`.
+ * client.
+ *
+ * **Ce que ces tests ne peuvent pas faire, et il faut le savoir en les lisant :**
+ * ils lisent du texte. Ils disent qu'un mécanisme est écrit, jamais qu'il tourne,
+ * et encore moins que Bricks émet toujours ce qu'il vise. La 1.5.0 en a fait la
+ * démonstration : cinq tests d'ici passaient au vert sur des fonctions qui
+ * rendaient `false` en toutes circonstances, parce que le repère qu'elles
+ * consultaient n'existait pas dans le DOM. Le seul juge du comportement est
+ * `./bin/test-builder-interactions.mjs`, qui ouvre un vrai builder et clique.
+ *
+ * Deux conséquences pour qui ajoute un test ici :
+ *
+ *   - un test **d'absence** est plus solide qu'un test de présence : il interdit
+ *     le retour d'un défaut payé, et cela se vérifie sans exécuter le script ;
+ *   - un test de présence ne doit épingler que ce dont on a la **mesure**, jamais
+ *     ce qu'on suppose du DOM de Bricks — sinon il fige une erreur.
  *
  * Lancement : php blueprint/mu-plugins/anode-builder/tests/test-builder.php
  *
@@ -317,6 +331,39 @@ function code(): string {
 	return $code;
 }
 
+/**
+ * Le corps d'un des deux gestionnaires de double-clic, sans commentaires.
+ *
+ * Les deux ne décident pas de la même façon, et c'est voulu : dans la structure la
+ * ligne cliquée est celle qu'on juge, dans le canevas il faut remonter de l'élément
+ * sélectionné à l'instance qui le porte. Un test qui lisait le fichier entier ne
+ * pouvait donc distinguer « la remontée est de retour dans la structure » — le
+ * défaut qui faisait quitter un composant en renommant une carte — de la remontée
+ * légitime du canevas. Il passait au vert dans les deux cas.
+ *
+ * @param string $lequel « structure » ou « canevas ».
+ */
+function gestionnaire( string $lequel ): string {
+	$corps  = code();
+	$canevas = strpos( $corps, 'const ecouterLeCanevas' );
+
+	if ( false === $canevas ) {
+		throw new \RuntimeException( 'gestionnaire du canevas introuvable : ecouterLeCanevas a disparu' );
+	}
+
+	if ( 'canevas' === $lequel ) {
+		return substr( $corps, $canevas );
+	}
+
+	$structure = strpos( $corps, "document.addEventListener('dblclick'" );
+
+	if ( false === $structure || $structure > $canevas ) {
+		throw new \RuntimeException( 'gestionnaire de la structure introuvable, ou passé après celui du canevas' );
+	}
+
+	return substr( $corps, $structure, $canevas - $structure );
+}
+
 test( 'chaque sélecteur relevé est présent dans le script', function (): void {
 	/*
 	 * Ces six sélecteurs ont été relevés dans un builder Bricks 2.3.10, en
@@ -329,14 +376,20 @@ test( 'chaque sélecteur relevé est présent dans le script', function (): void
 	 * exécutable en même temps que la notion d'« élément courant », et ne
 	 * subsistait que dans le commentaire d'en-tête. Le test passait au vert en ne
 	 * garantissant rien — un sélecteur cité en prose n'accroche rien.
+	 *
+	 * Un septième y a figuré et n'y est plus : `li.element[data-parent-id="0"]`,
+	 * présenté comme le repère du mode d'édition. Le relevé de douze états l'a
+	 * démenti — la racine affichée en édition de composant déclare le même parent
+	 * qu'au niveau de la page. Un sélecteur épinglé n'est pas un sélecteur vrai :
+	 * celui-là était épinglé, présent, et sans effet.
 	 */
 	$attendus = [
-		'.active-classes li'                               => 'les classes de l’élément',
-		'#bricks-toolbar input#preview-width'              => 'la largeur du canevas',
-		'#bricks-structure li.element[data-id]'            => 'les lignes de la structure',
-		'#bricks-structure li.element.active'              => 'la ligne sélectionnée',
-		'#bricks-structure li.element[data-parent-id="0"]' => 'le niveau de la page',
-		'#bricks-panel span.bricks-svg-wrapper.component'  => 'le bouton d’édition du composant',
+		'.active-classes li'                              => 'les classes de l’élément',
+		'#bricks-toolbar input#preview-width'             => 'la largeur du canevas',
+		'#bricks-structure li.element[data-id]'           => 'les lignes de la structure',
+		'#bricks-structure li.element.active'             => 'la ligne sélectionnée',
+		'#bricks-structure li.element.component'          => 'une instance de composant, dans le canevas',
+		'#bricks-panel span.bricks-svg-wrapper.component' => 'le bouton d’édition du composant',
 	];
 
 	foreach ( $attendus as $selecteur => $role ) {
@@ -459,107 +512,124 @@ test( 'aucune notion d’« élément courant » ne subsiste', function (): void
 	);
 } );
 
-test( 'la décision porte sur la cible, pas sur le fait d’être dans un composant', function (): void {
+test( 'le bouton du panneau est le seul juge de ce qui s’ouvre', function (): void {
 	/*
-	 * La cause des trois instabilités constatées, qui n'en faisaient qu'une.
+	 * La cause unique des trois défauts de la 1.5.0, et elle n'était pas dans la
+	 * logique : elle était dans les repères que cette logique consultait.
 	 *
-	 * Le bouton du panneau ne veut pas dire « voici un composant à ouvrir » : le
-	 * rendu de Bricks l'affiche dès que la sélection touche un composant, y compris
-	 * celui qu'on édite. Et `setActiveComponent` sur le composant courant
-	 * **bascule** — il fait sortir. D'où : on sortait sans savoir pourquoi, un
-	 * troisième clic éjectait, et sélectionner un élément du composant aussi.
+	 * Deux repères avaient été supposés pour savoir *quel* composant le bouton
+	 * ouvrirait. Le relevé de douze états d'un Bricks 2.3.10 — dont quatre en édition
+	 * de composant — les a démentis tous les deux : la racine affichée en édition
+	 * déclare le même parent qu'au niveau de la page, et la classe `component` y suit
+	 * la sélection au lieu de marquer les instances. Les deux fonctions écrites pour
+	 * discriminer ne discriminaient rien, et les onze cas de comportement passaient
+	 * quand même — c'est le bouton qui les tenait, sans que ce soit écrit nulle part.
 	 *
-	 * La première correction a répondu « suis-je dedans ? », et refusait d'agir
-	 * dans ce cas. C'était trop large : elle interdisait d'ouvrir un composant
-	 * **imbriqué**, qui est un cas prévu par le §4 du CLAUDE.md. La bonne question
-	 * est « la cible est-elle un composant *autre* que celui que j'édite ? ».
+	 * Ce test épingle donc le mécanisme réel : les deux gestionnaires lisent le
+	 * bouton, et ils n'ont rien d'autre à consulter.
 	 */
-	assert_true( str_contains( code(), 'const ouvrable = (ligne)' ), 'la décision par cible a disparu' );
+	assert_same( 2, substr_count( code(), 'boutonDuPanneau()' ), 'les deux gestionnaires ne lisent pas le bouton' );
 
-	// La garde en barrière est proscrite : c'est elle qui rendait l'imbrication
-	// impossible. Le mode d'édition ne doit servir qu'à *interpréter* la cible.
-	assert_true(
-		! str_contains( code(), 'if (dansUnComposant()) return;' ),
-		'la garde qui interdisait l’imbrication est de retour'
-	);
-	assert_same(
-		1,
-		substr_count( code(), 'enEditionDeComposant()' ),
-		'le mode d’édition est consulté ailleurs que dans la décision'
-	);
-
-	// Les deux gestionnaires passent par la même décision. N'en équiper qu'un
-	// laisserait la moitié du défaut — c'est exactement ce qui a été livré en 1.4.0
-	// pour le canevas, qui n'avait pas de notion de cible du tout.
-	assert_same( 2, substr_count( code(), 'ouvrable(' ), 'les deux gestionnaires ne décident pas de la même façon' );
+	// Les deux fonctions de déduction sont retirées, pas corrigées : il n'y a rien à
+	// déduire d'un DOM qui ne porte pas l'information.
+	foreach ( [ 'ouvrable', 'enEditionDeComposant', 'composantPortant', 'ligneParente' ] as $disparue ) {
+		assert_true(
+			! str_contains( code(), $disparue ),
+			"« {$disparue} » est de retour : elle déduisait le mode d’édition d’un repère mesuré faux"
+		);
+	}
 } );
 
-test( 'un composant imbriqué peut être ouvert, la racine de celui qu’on édite non', function (): void {
+test( 'aucun repère de mode d’édition n’est de retour', function (): void {
 	/*
-	 * Le repère est franc, et mesuré dans le builder : au niveau de la page, des
-	 * lignes de structure portent `data-parent-id="0"` ; en édition de composant,
-	 * plus aucune, et la racine affichée **est** le composant courant.
+	 * Le test le plus utile du fichier, et c'est un test d'absence.
 	 *
-	 * D'où la règle : hors édition, tout composant s'ouvre — l'en-tête et le pied
-	 * de page sont des instances posées à la racine de la page (§4) ; en édition,
-	 * tout sauf la racine, qui rouvrirait le composant courant et donc en
-	 * sortirait.
+	 * Deux versions de suite ont cru disposer d'un repère franc du mode d'édition,
+	 * l'ont documenté comme « mesuré », et se sont trompées. Le relevé qui a tranché
+	 * portait sur douze états, quatre en édition : **la racine affichée en édition de
+	 * composant déclare le même parent qu'au niveau de la page.** La garde bâtie
+	 * dessus rendait `false` partout, sur les deux versions.
+	 *
+	 * Aucun autre repère n'a été trouvé dans ce build — ni classe sur le corps du
+	 * document, ni fil d'Ariane, ni ligne sans parent. Le nombre de racines distingue
+	 * bien les deux modes dans le décor du test, mais une page à une seule section le
+	 * mettrait en défaut : ce n'est pas un repère, c'est une coïncidence de décor.
+	 *
+	 * Tant que la mesure n'a pas produit un repère vrai, en écrire un est un défaut :
+	 * il donne l'illusion d'un filet de sécurité là où il n'y en a pas. La règle est
+	 * donc « pas de mode d'édition dans ce fichier », et ce test la tient.
 	 */
-	assert_true(
-		str_contains( code(), 'data-parent-id="0"' ),
-		'le repère de niveau de page n’est plus consulté'
-	);
+	foreach ( [ 'data-parent-id', 'racines', 'estRacine' ] as $repere ) {
+		assert_true(
+			! str_contains( code(), $repere ),
+			"« {$repere} » est de retour : mesuré, il ne distingue pas l’édition d’un composant du niveau de la page"
+		);
+	}
 
-	// Une racine se reconnaît à l'absence de ligne parente affichée. Refuser
-	// « toute racine » sans distinguer le mode rendrait l'en-tête inouvrable.
+	// Et le mode n'est pas davantage déduit du nombre de lignes affichées, qui serait
+	// la variante suivante du même défaut.
 	assert_true(
-		str_contains( code(), '!enEditionDeComposant() || ligneParente(ligne) !== null' ),
-		'la racine n’est plus distinguée du mode d’édition'
+		! str_contains( code(), 'lignes().length' ),
+		'le mode est déduit du nombre de lignes — vrai dans ce décor, faux sur une page à une seule section'
 	);
-
-	// Le parent se lit par identifiant, pas seulement par l'imbrication du DOM :
-	// une structure rendue à plat perdrait toute notion de racine.
-	assert_true( str_contains( code(), "getAttribute('data-parent-id')" ), 'le parent déclaré n’est plus lu' );
 } );
 
-test( 'double-cliquer un enfant ne remonte plus au composant qui le contient', function (): void {
+test( 'double-cliquer un enfant ne remonte pas au composant qui le contient', function (): void {
 	/*
-	 * Le symptôme « juste sélectionner un élément présent dans le composant nous
-	 * fait quitter », vu depuis la structure : les lignes y sont imbriquées, et
+	 * Le symptôme « juste sélectionner un élément présent dans le composant nous fait
+	 * quitter », vu depuis la structure : les lignes y sont imbriquées, et
 	 * `closest('#bricks-structure li.element.component')` depuis un enfant rendait
 	 * l'instance qui le porte. Un double-clic destiné au renommage d'une carte
-	 * ouvrait donc le composant — ou, en édition, en sortait.
+	 * ouvrait donc le composant.
+	 *
+	 * La lecture porte sur le **gestionnaire de la structure** seul, et c'est le
+	 * correctif de ce test : le canevas, lui, doit remonter — Bricks y sélectionne
+	 * l'élément et non l'instance. Un test qui lisait le fichier entier ne pouvait pas
+	 * distinguer les deux, et il n'interdisait plus rien du jour où le canevas s'est
+	 * mis à remonter légitimement.
 	 */
 	assert_true(
-		! str_contains( code(), '#bricks-structure li.element.component' ),
+		! str_contains( gestionnaire( 'structure' ), 'li.element.component' ),
 		'la remontée au composant ancêtre est de retour dans la structure'
 	);
 
-	// La ligne visée est celle qu'on a cliquée, et sa qualité de composant se lit
-	// sur elle seule.
-	assert_true( str_contains( code(), 'closest?.(selecteurLigne)' ), 'la ligne cliquée n’est plus celle qu’on juge' );
-	assert_true( str_contains( code(), "classList.contains('component')" ), 'la qualité de composant n’est plus lue' );
+	// La ligne visée est celle qu'on a cliquée, et sa qualité de composant se lit sur
+	// elle seule — c'est la garde de niveau de page, le seul endroit où la classe dit
+	// la vérité.
+	assert_true(
+		str_contains( gestionnaire( 'structure' ), 'closest?.(selecteurLigne)' ),
+		'la ligne cliquée n’est plus celle qu’on juge'
+	);
+	assert_true(
+		str_contains( gestionnaire( 'structure' ), "ligne.classList.contains('component')" ),
+		'la garde de niveau de page a disparu : le bouton, en retard d’un rendu, rouvrirait le composant précédent'
+	);
 } );
 
-test( 'dans le canevas, c’est la sélection qui décide, jamais le seul bouton', function (): void {
+test( 'le canevas part de la sélection, et s’abstient sans elle', function (): void {
 	/*
 	 * Le canevas n'a pas de ligne de structure sous le curseur : la 1.4.0 s'y
-	 * contentait donc de la présence du bouton, qui ne dit pas *quel* composant il
-	 * ouvrirait. En édition, il apparaît aussi pour le composant courant — et
-	 * l'ouvrir bascule, donc sort. C'est le troisième symptôme.
+	 * contentait de la présence du bouton, sans savoir sur quoi elle agissait.
 	 *
-	 * On lit la ligne sélectionnée — le premier des deux clics l'a posée — puis on
-	 * remonte à l'instance qui la porte, et c'est la même décision qu'ailleurs.
+	 * On lit donc la ligne sélectionnée — le premier des deux clics l'a posée —, puis
+	 * on remonte à l'instance qui la porte, parce que Bricks sélectionne l'élément
+	 * cliqué. Cette remontée est la garde de niveau de page, équivalent exact de la
+	 * lecture de classe du côté structure.
 	 */
-	assert_true( str_contains( code(), 'ligneActive()' ), 'la sélection n’est plus lue depuis le canevas' );
+	$canevas = gestionnaire( 'canevas' );
+
+	assert_true( str_contains( $canevas, 'ligneActive()' ), 'la sélection n’est plus lue depuis le canevas' );
 	assert_true(
-		str_contains( code(), 'ouvrable(composantPortant(active))' ),
-		'le canevas décide encore sur autre chose que sa sélection'
+		str_contains( $canevas, 'dansUneInstance(active)' ),
+		'le canevas n’écarte plus un double-clic sur un élément hors composant'
 	);
 
 	// Sans sélection lisible — structure repliée, panneau pas encore rendu — on ne
 	// sait pas sur quoi on agirait : on s'abstient plutôt que d'agir au hasard.
-	assert_true( str_contains( code(), 'if (!active) return;' ), 'le canevas agit sans savoir sur quoi' );
+	assert_true( str_contains( $canevas, 'if (!active) return;' ), 'le canevas agit sans savoir sur quoi' );
+
+	// Et il lit le bouton, comme la structure : c'est lui qui tranche des deux côtés.
+	assert_true( str_contains( $canevas, 'boutonDuPanneau()' ), 'le canevas ne consulte plus le bouton' );
 } );
 
 test( 'le canevas ne coupe aucun geste', function (): void {
@@ -573,11 +643,29 @@ test( 'le canevas ne coupe aucun geste', function (): void {
 	assert_same( 1, substr_count( code(), 'stopImmediatePropagation' ), 'un blocage a été ajouté hors de la structure' );
 } );
 
-test( 'la remontée au composant portant est bornée', function (): void {
-	// Un `data-parent-id` incohérent — une ligne qui se déclare son propre parent
-	// le temps d'un glisser-déposer — ferait une boucle infinie dans le fil de
-	// l'interface : le builder se figerait sur un double-clic.
-	assert_true( str_contains( code(), 'profondeur < 50' ), 'la remontée n’est plus bornée' );
+test( 'la remontée du canevas ne peut pas boucler', function (): void {
+	/*
+	 * La version précédente remontait par `data-parent-id`, d'une ligne à l'autre, et
+	 * devait donc se borner à cinquante niveaux : un attribut incohérent — une ligne
+	 * qui se déclare son propre parent le temps d'un glisser-déposer — aurait figé le
+	 * builder sur un double-clic.
+	 *
+	 * `closest` supprime la borne **et** ce qu'elle protégeait : il remonte
+	 * l'imbrication réelle du DOM, qui ne peut pas être cyclique. Vérifié dans le
+	 * builder : la structure est bien imbriquée, et le repli par attribut ne servait
+	 * jamais.
+	 */
+	assert_true(
+		str_contains( code(), "closest?.('#bricks-structure li.element.component')" ),
+		'la remontée du canevas a disparu'
+	);
+
+	foreach ( [ 'profondeur', 'for (let courante' ] as $boucle ) {
+		assert_true(
+			! str_contains( code(), $boucle ),
+			"une remontée à la main est de retour ({$boucle}) : elle demande une borne que closest rend inutile"
+		);
+	}
 } );
 
 test( 'trois clics rapides ne produisent qu’une seule action', function (): void {
@@ -642,6 +730,37 @@ test( 'aucune fonction interne de Vue n’est appelée', function (): void {
 			sprintf( 'le script touche à un interne de Vue : %s', $interne )
 		);
 	}
+} );
+
+test( 'aucune fonction déclarée n’est morte', function (): void {
+	/*
+	 * `patienter()` a vécu deux versions sans être appelée une seule fois : trente
+	 * lignes de code et de commentaire décrivant une attente qui n'attendait rien.
+	 * Personne ne l'a vu, et c'est normal — du code mort ne produit aucun symptôme.
+	 *
+	 * Le coût n'est pas la place qu'il prend : c'est qu'il se lit comme du mécanisme.
+	 * Le rapport de mesure a dû aller vérifier par `grep` qu'il ne servait pas, et
+	 * deux relectures avaient conclu que le composant faisait ce que ce code décrivait.
+	 *
+	 * Ce test relève chaque `const` du script et exige qu'il soit **employé** ailleurs
+	 * que dans sa propre déclaration. Il ne comprend pas les portées : c'est sans
+	 * conséquence ici, un nom employé quelque part est un nom qui sert.
+	 */
+	preg_match_all( '/\bconst ([A-Za-z][A-Za-z0-9]*) = /', code(), $trouves );
+
+	$declares = array_unique( $trouves[1] );
+
+	assert_true( count( $declares ) > 20, 'les déclarations ne sont plus reconnues : ' . count( $declares ) );
+
+	$mortes = [];
+
+	foreach ( $declares as $nom ) {
+		if ( preg_match_all( '/\b' . preg_quote( $nom, '/' ) . '\b/', code() ) < 2 ) {
+			$mortes[] = $nom;
+		}
+	}
+
+	assert_same( [], $mortes, 'déclarée et jamais employée — du code mort se lit comme du mécanisme' );
 } );
 
 test( 'une fonction en échec n’emporte pas les autres', function (): void {

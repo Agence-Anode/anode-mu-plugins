@@ -11,13 +11,16 @@
  *   - les classes de l'élément : `.bricks-panel-selectors ul.active-classes li`,
  *     chacune portant `[data-class-id]`, et `.active` sur la sélectionnée ;
  *   - la largeur du canevas : `input#preview-width` dans `#bricks-toolbar` ;
- *   - les lignes de la structure : `#bricks-structure li.element[data-id]`, qui
- *     déclarent leur parent par `data-parent-id`, portent `.active` sur la
- *     sélectionnée et `.component` sur une instance de composant ;
- *   - le niveau de la page : au moins une ligne à `data-parent-id="0"`. En
- *     édition de composant, plus aucune — c'est le repère du mode ;
+ *   - les lignes de la structure : `#bricks-structure li.element[data-id]`,
+ *     imbriquées comme les éléments, `.active` sur la sélectionnée et
+ *     `.component` sur une instance de composant ;
  *   - le bouton qui ouvre un composant : dans `#bricks-panel`, le `li` qui
  *     contient `span.bricks-svg-wrapper.component`.
+ *
+ * Deux repères de plus avaient été supposés, et la mesure les a démentis : le
+ * parent déclaré d'une ligne ne dit pas si l'on édite un composant, et la classe
+ * `component` n'identifie une instance qu'au niveau de la page. Voir la fonction
+ * 3, où ils coûtaient une garde qui ne gardait rien.
  *
  * Chaque fonction est isolée : celle qui échoue n'emporte pas les autres, et un
  * point d'accroche disparu la rend inerte plutôt que bruyante.
@@ -54,27 +57,6 @@
       resolve(null);
     }, delai);
   });
-
-  /**
-   * Attend qu'une condition rende quelque chose, en scrutant à petits pas.
-   *
-   * `MutationObserver` ne conviendrait pas ici : la condition porte sur un
-   * contenu que Vue remplace, et l'observateur se déclencherait des dizaines de
-   * fois par frappe. Une scrutation courte et bornée est plus lisible, et elle
-   * s'arrête d'elle-même.
-   */
-  const patienter = async (condition, delai) => {
-    const fin = Date.now() + delai;
-
-    for (;;) {
-      const valeur = condition();
-
-      if (valeur) return valeur;
-      if (Date.now() > fin) return null;
-
-      await new Promise((resolve) => requestAnimationFrame(resolve));
-    }
-  };
 
   /**
    * Un clic que Vue entend.
@@ -325,25 +307,56 @@
    * ------------------------------------------------------------------ */
 
   /**
-   * On passe par le bouton du panneau, pas par le menu contextuel.
+   * Le bouton du panneau est l'oracle — et c'est une mesure, pas un choix.
    *
-   * Deux raisons, toutes deux mesurées.
+   * Deux repères ont été supposés avant lui pour savoir *quel* composant le bouton
+   * ouvrirait. Tous deux sont faux, relevés ligne par ligne dans un Bricks 2.3.10
+   * sur douze états, dont quatre en édition de composant :
    *
-   * D'abord le menu : `#bricks-builder-context-menu` existe en permanence dans le
-   * DOM, vide, et ne se **remplit** qu'après un rendu de Vue. Le trouver ne
-   * prouvait rien, et le clic partait dans le vide — le double-clic ne faisait
-   * alors que sélectionner la ligne, en laissant parfois le menu ouvert sur une
-   * entrée voisine.
+   *   - **le parent déclaré d'une ligne ne dit pas le mode.** La racine affichée en
+   *     édition de composant continue de se déclarer enfant de la page, exactement
+   *     comme au niveau de la page. La fonction qui concluait « on édite un
+   *     composant » à l'absence de racine rendait donc `false` partout : elle n'a
+   *     jamais rien gardé, sur aucune version ;
+   *   - **la classe `component` n'identifie une instance qu'au niveau de la page.**
+   *     Là, elle ne se pose que sur les vraies instances, quelle que soit la
+   *     sélection. En **édition**, elle *suit la sélection* : sélectionner un titre
+   *     — un `heading`, aucune instance — la lui donne et la retire de la racine.
+   *     Toute décision fondée sur elle y répond « oui » pour n'importe quelle
+   *     ligne sélectionnée.
    *
-   * Ensuite, Bricks **utilise déjà le double-clic** sur `.structure-item` : c'est
-   * son mode « renommer ». Notre gestionnaire doit donc le devancer et l'arrêter,
-   * sans quoi les deux comportements se superposent.
+   * Ce qui reste, et qui est exact dans les douze états : **la présence du bouton**.
+   * Il est là dans deux cas — instance racine sélectionnée au niveau de la page,
+   * instance imbriquée sélectionnée en édition —, soit précisément les deux où il
+   * faut ouvrir. Il est absent quand la racine qu'on édite est sélectionnée (Bricks
+   * ne propose pas de rouvrir ce qu'on édite), quand un enfant l'est, et même quand
+   * une instance imbriquée est sélectionnée depuis la page : Bricks s'abstient, et
+   * c'est le bon geste.
    *
-   * Le bouton, lui, est du DOM stable : dans `#bricks-panel`, le `li` qui contient
-   * `span.bricks-svg-wrapper.component`. Il n'apparaît qu'une fois le composant
-   * sélectionné, et disparaît dès qu'on est entré dedans — ce qui en fait aussi
-   * le signal de réussite. Sa classe est visée, jamais son `data-balloon`, qui est
-   * traduit.
+   * Il n'y a donc rien à déduire : on lit ce que Bricks propose, et on clique ce
+   * qu'un humain aurait cliqué. `bin/test-builder-interactions.mjs` éprouve ces
+   * trois absences et cette présence dans un vrai builder — c'est ce qui fait de la
+   * présence un oracle plutôt qu'une supposition.
+   *
+   * **Ce qui n'est pas couvert, et qu'il faut dire plutôt qu'habiller en garde :**
+   * si une version de Bricks affichait ce bouton alors qu'on édite le composant
+   * visé, le double-clic en sortirait. Aucun repère du mode d'édition n'existe dans
+   * ce build — ni classe sur le corps du document, ni fil d'Ariane, ni ligne sans
+   * parent —, donc aucune garde locale ne peut couvrir ce cas. Le test en ligne le
+   * verrait ; ce fichier, non.
+   *
+   * Deux chemins écartés, chacun pour un défaut mesuré :
+   *
+   *   - le **menu contextuel** : `#bricks-builder-context-menu` existe en
+   *     permanence, vide, et ne se remplit qu'après un rendu de Vue. Le trouver ne
+   *     prouvait rien, le clic partait dans le vide, et le double-clic ne faisait
+   *     que sélectionner la ligne ;
+   *   - le `data-balloon` du bouton, qui est **traduit** : « Modifier le composant »
+   *     ici, « Edit component » ailleurs. Sa classe est visée, jamais son libellé.
+   *
+   * Enfin, Bricks **utilise déjà le double-clic** sur `.structure-item` : c'est son
+   * mode « renommer ». Le gestionnaire de la structure doit donc le devancer et
+   * l'arrêter — mais seulement quand il a réellement de quoi ouvrir.
    */
   const composantDblclic = () => {
     const boutonDuPanneau = () => [...document.querySelectorAll('#bricks-panel span.bricks-svg-wrapper.component')]
@@ -351,87 +364,29 @@
       .find(Boolean) ?? null;
 
     /*
-     * `data-id` fait partie du sélecteur, et pas par élégance : le panneau
-     * contient d'autres `li.element` que ses lignes d'éléments, et une ligne sans
-     * identifiant ne se rattache à rien — on ne saurait ni dire son parent, ni la
-     * reconnaître comme racine.
+     * `data-id` fait partie du sélecteur, et pas par élégance : le panneau contient
+     * d'autres `li.element` que ses lignes d'éléments, et une ligne sans
+     * identifiant ne désigne aucun élément — un double-clic dessus n'a rien à
+     * ouvrir.
      */
     const selecteurLigne = '#bricks-structure li.element[data-id]';
-
-    const lignes = () => [...document.querySelectorAll(selecteurLigne)];
 
     const ligneActive = () => document.querySelector('#bricks-structure li.element.active');
 
     /**
-     * Édite-t-on un composant en ce moment ?
+     * La sélection est-elle dans une instance de composant ?
      *
-     * Le repère est franc, et mesuré : au niveau de la page, les lignes racines
-     * portent `data-parent-id="0"` ; en édition de composant, la structure
-     * n'affiche que le composant et plus aucune ligne n'a `0` pour parent.
+     * Sert au **canevas** seulement, et pour une raison de forme : Bricks y
+     * sélectionne l'élément cliqué, pas l'instance qui le porte. La ligne active
+     * est donc un enfant, et c'est en remontant qu'on sait si l'on a affaire à un
+     * composant. `closest` suffit — les lignes de la structure sont réellement
+     * imbriquées dans le DOM (vérifié), et une remontée par attribut demandait une
+     * borne de profondeur contre une boucle que celle-ci ne peut pas faire.
      *
-     * Cette question ne sert **qu'à interpréter la cible**, jamais à s'interdire
-     * d'agir. La version précédente en faisait une barrière — « déjà dedans, on
-     * ne touche à rien » — ce qui rendait un composant imbriqué impossible à
-     * ouvrir, alors que l'imbrication est un cas prévu (§4 du CLAUDE.md).
+     * Comme la classe `component`, cette lecture n'est fiable qu'au niveau de la
+     * page. C'est une garde, pas une décision : le bouton tranche.
      */
-    const enEditionDeComposant = () => lignes().length > 0
-      && document.querySelector('#bricks-structure li.element[data-parent-id="0"]') === null;
-
-    /** La ligne parente affichée, ou `null` si celle-ci est une racine. */
-    const ligneParente = (ligne) => {
-      const parent = ligne.getAttribute('data-parent-id');
-
-      if (parent) {
-        // `0` désigne la page elle-même : aucune ligne ne porte cet identifiant,
-        // la recherche rend donc `null` — la bonne réponse pour une racine.
-        return document.querySelector(`#bricks-structure li.element[data-id="${CSS.escape(parent)}"]`);
-      }
-
-      // Attribut absent : on retombe sur l'imbrication réelle du DOM, qui reste
-      // vraie si Bricks cesse un jour de déclarer le parent.
-      return ligne.parentElement?.closest(selecteurLigne) ?? null;
-    };
-
-    /** La ligne de composant qui porte celle-ci — elle-même si c'en est une. */
-    const composantPortant = (ligne) => {
-      // La borne n'est pas décorative : un `data-parent-id` incohérent — une ligne
-      // qui se déclare son propre parent pendant un glisser-déposer — ferait une
-      // boucle infinie dans le fil de l'interface.
-      for (let courante = ligne, profondeur = 0; courante && profondeur < 50; profondeur += 1) {
-        if (courante.classList.contains('component')) return courante;
-
-        courante = ligneParente(courante);
-      }
-
-      return null;
-    };
-
-    /**
-     * Cette ligne désigne-t-elle un composant qu'on peut **ouvrir** ?
-     *
-     * C'est la question qui manquait, et la mauvaise réponse expliquait les trois
-     * symptômes constatés — on sortait sans savoir pourquoi, un troisième clic
-     * éjectait, et sélectionner un élément du composant éjectait aussi.
-     *
-     * Le bouton du panneau ne dit pas « voici un composant à ouvrir » : le rendu
-     * de Bricks l'affiche dès que la sélection touche un composant, y compris
-     * celui qu'on édite. Et `setActiveComponent` appliqué au composant courant
-     * **bascule** : il fait sortir. La présence du bouton ne suffit donc pas, il
-     * faut savoir **lequel** il ouvrirait.
-     *
-     * Deux cas, et un seul refus :
-     *
-     *   - au niveau de la page, toute ligne de composant est ouvrable, racine
-     *     comprise — l'en-tête et le pied de page sont posés là, sans template ;
-     *   - en édition de composant, la racine de ce qu'affiche la structure **est**
-     *     le composant courant : l'ouvrir ferait sortir. Toute autre ligne
-     *     `.component` est une instance imbriquée, donc une cible légitime.
-     */
-    const ouvrable = (ligne) => {
-      if (!ligne?.classList.contains('component')) return false;
-
-      return !enEditionDeComposant() || ligneParente(ligne) !== null;
-    };
+    const dansUneInstance = (ligne) => ligne?.closest?.('#bricks-structure li.element.component') != null;
 
     /*
      * Un verrou de temps, en plus.
@@ -471,24 +426,33 @@
       // Un champ en cours d'édition : le double-clic y sélectionne un mot.
       if (evenement.target.closest('input, textarea, [contenteditable="true"]')) return;
 
-      // Rien à ouvrir : on laisse Bricks renommer, sélectionner, déplacer.
-      if (!ouvrable(ligne)) return;
+      /*
+       * La ligne cliquée doit se déclarer instance — et cette garde sert au niveau
+       * de la page, seul endroit où la classe est fiable.
+       *
+       * Elle n'est pas redondante avec le bouton : le bouton reflète la
+       * **sélection**, qui est en retard d'un rendu de Vue sur le geste. Double-cliquer
+       * une ligne ordinaire juste après avoir sélectionné un composant trouverait
+       * donc le bouton encore affiché — et rouvrirait le composant précédent au lieu
+       * de renommer. C'est le cas « juste après un composant » du test en ligne.
+       *
+       * En édition de composant, la classe suit la sélection : la garde y laisse
+       * tout passer, et c'est le bouton qui écarte la racine éditée et ses enfants.
+       */
+      if (!ligne.classList.contains('component')) return;
 
       /*
-       * On ne devance Bricks **que** si l'on a réellement quelque chose à ouvrir.
+       * Le bouton est lu **avant** tout blocage, et cet ordre a été payé.
        *
-       * La version précédente coupait le geste d'abord et cherchait le bouton
-       * ensuite. Résultat, mesuré à l'usage : une fois **dans** un composant, il
-       * n'y a plus de composant à ouvrir, mais la ligne racine porte toujours la
-       * classe `component` — le renommage au double-clic était donc supprimé sans
-       * rien offrir en échange. Le builder devenait moins utilisable qu'avant.
+       * La version qui coupait le geste d'abord et cherchait le bouton ensuite
+       * supprimait le renommage au double-clic sans rien offrir en échange, dès
+       * qu'aucun composant n'était ouvrable — le builder devenait moins utilisable
+       * qu'avant. Absent, le bouton veut dire « Bricks n'a rien à ouvrir ici » : le
+       * renommage reprend alors ses droits.
        *
-       * Le bouton n'est pas juge de *quoi* ouvrir — `ouvrable()` s'en est chargé —
-       * mais il reste juge du *pouvoir* ouvrir : absent, Bricks n'a rien à nous
-       * offrir et le renommage doit reprendre ses droits. Il est déjà là au moment
-       * du double-clic, puisque le premier des deux clics a sélectionné la ligne :
-       * d'où la lecture synchrone, sans attente qui laisserait le renommage
-       * démarrer.
+       * Il est déjà là au moment du double-clic, puisque le premier des deux clics a
+       * sélectionné la ligne — d'où la lecture synchrone, sans attente qui laisserait
+       * le renommage démarrer entre-temps.
        */
       const bouton = boutonDuPanneau();
 
@@ -511,9 +475,10 @@
      *
      * Ce qui manque, en revanche, c'est la ligne de structure sous le curseur. On
      * la retrouve par la **sélection** : le premier des deux clics l'a posée, et
-     * Bricks met la structure en correspondance. C'est le seul moyen de savoir
-     * *quel* composant le bouton ouvrirait — et se contenter de sa présence est
-     * précisément ce qui faisait sortir du composant qu'on éditait.
+     * Bricks met la structure en correspondance. Sans elle — structure repliée,
+     * panneau pas encore rendu — on s'abstient : on ne saurait pas sur quoi on
+     * agit, et agir « au bouton » sans rien savoir est ce qui a rendu la fonction
+     * nuisible en 1.4.0.
      */
     const ecouterLeCanevas = (fenetre) => {
       if (!fenetre?.document || fenetre.document.anodeBuilderEcoute) return;
@@ -530,11 +495,11 @@
         // est ce qui a rendu la fonction nuisible.
         if (!active) return;
 
-        // Depuis le canevas, Bricks sélectionne l'élément lui-même : on remonte à
-        // l'instance qui le porte, puis c'est la même décision que dans la
-        // structure. Un élément du composant édité remonte à sa racine, donc au
-        // composant courant, donc au refus — le symptôme est traité à sa cause.
-        if (!ouvrable(composantPortant(active))) return;
+        // La même garde que dans la structure, à ceci près que la sélection porte
+        // sur l'élément et non sur l'instance : on remonte. Au niveau de la page,
+        // elle écarte un double-clic ordinaire sur un texte ou une image ; en
+        // édition, elle laisse passer, et c'est le bouton qui tranche.
+        if (!dansUneInstance(active)) return;
 
         const bouton = boutonDuPanneau();
 
