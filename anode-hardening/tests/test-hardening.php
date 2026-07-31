@@ -131,7 +131,17 @@ function wp_parse_url( string $url, int $composant = -1 ) {
 		return false;
 	}
 
-	return PHP_URL_PATH === $composant ? ( $parts['path'] ?? '' ) : $parts;
+	if ( PHP_URL_PATH === $composant ) {
+		return $parts['path'] ?? '';
+	}
+
+	// L'hôte décide de la portée de HSTS : il doit pouvoir varier d'un test à
+	// l'autre, comme le chemin.
+	if ( PHP_URL_HOST === $composant ) {
+		return $parts['host'] ?? '';
+	}
+
+	return $parts;
 }
 
 /**
@@ -143,7 +153,16 @@ function add_action( string $accroche, $rappel = null, int $priorite = 10 ): voi
 
 	$etat['accroches'][ $accroche ][] = $rappel;
 }
-function add_filter(): void {}
+/**
+ * Les filtres sont retenus comme les actions : l'en-tête HSTS réellement émis
+ * ne s'éprouve qu'en rappelant la fermeture posée sur `wp_headers`. Vérifier la
+ * fonction d'aide seule laisserait passer une erreur de câblage.
+ */
+function add_filter( string $filtre, $rappel = null, int $priorite = 10 ): void {
+	global $etat;
+
+	$etat['filtres'][ $filtre ][] = $rappel;
+}
 
 /**
  * `remove_action` est observée : c'est elle qui désarme la redirection de
@@ -167,7 +186,19 @@ function is_author(): bool {
 	return false;
 }
 function is_ssl(): bool {
-	return false;
+	global $etat;
+
+	return (bool) ( $etat['ssl'] ?? false );
+}
+/**
+ * WordPress rend « production » sans déclaration. La doublure en fait autant :
+ * c'est l'état de la plupart des installations, et c'est celui où le défaut de
+ * portée de HSTS se manifestait.
+ */
+function wp_get_environment_type(): string {
+	global $etat;
+
+	return (string) ( $etat['environnement'] ?? 'production' );
 }
 function status_header(): void {}
 function nocache_headers(): void {}
@@ -193,6 +224,13 @@ require_once __DIR__ . '/../anode-hardening.php';
  */
 $accroches_enregistrees = $etat['accroches'];
 
+/**
+ * Même raison pour les filtres.
+ *
+ * @var array<string, list<callable>>
+ */
+$filtres_enregistres = $etat['filtres'] ?? [];
+
 /** Rejoue la fermeture enregistrée sur une accroche donnée. */
 function rejouer( string $accroche, int $rang = 0 ): void {
 	global $accroches_enregistrees;
@@ -204,6 +242,33 @@ function rejouer( string $accroche, int $rang = 0 ): void {
 	}
 
 	$rappel();
+}
+
+/**
+ * Rejoue **toutes** les fermetures posées sur un filtre, dans l'ordre, et rend
+ * la sortie de la dernière.
+ *
+ * Chaîner n'est pas un raffinement : `wp_headers` en porte deux — l'une retire
+ * `X-Pingback`, l'autre pose les en-têtes de sécurité. N'en rejouer qu'une
+ * rendait un tableau vide, et une assertion en `! isset(…)` passait au vert sur
+ * ce vide. Le test disait « aucun HSTS posé » alors qu'il n'avait rien exercé.
+ */
+function filtrer( string $filtre, $valeur ) {
+	global $filtres_enregistres;
+
+	$rappels = $filtres_enregistres[ $filtre ] ?? [];
+
+	if ( ! $rappels ) {
+		throw new \RuntimeException( "aucun filtre enregistré sur « {$filtre} »" );
+	}
+
+	foreach ( $rappels as $rappel ) {
+		if ( is_callable( $rappel ) ) {
+			$valeur = $rappel( $valeur );
+		}
+	}
+
+	return $valeur;
 }
 
 /* --- Harnais --------------------------------------------------------- */
@@ -426,6 +491,75 @@ test( 'une adresse absente ne fait pas tomber le compteur', function (): void {
 	record_failed_attempt();
 
 	assertTrue( true );
+} );
+
+/* --- Portée de HSTS -------------------------------------------------- */
+
+section( 'Portée de HSTS' );
+
+test( 'un site servi depuis son domaine engage ses sous-domaines', function (): void {
+	reinitialiser( [ 'base' => 'https://exemple.fr', 'ssl' => true ] );
+
+	assertSame(
+		'max-age=31536000; includeSubDomains',
+		filtrer( 'wp_headers', [] )['Strict-Transport-Security'] ?? null
+	);
+} );
+
+test( 'le « www » ne compte pas comme un sous-domaine de plus', function (): void {
+	reinitialiser( [ 'base' => 'https://www.exemple.fr', 'ssl' => true ] );
+
+	assertSame(
+		'max-age=31536000; includeSubDomains',
+		filtrer( 'wp_headers', [] )['Strict-Transport-Security'] ?? null
+	);
+} );
+
+test( 'une préproduction sur un domaine partagé n’engage que son hôte', function (): void {
+	/*
+	 * Le défaut mesuré en ligne : `client.anode-staging.fr` posait un an de HSTS
+	 * `includeSubDomains` sur `anode-staging.fr`, donc sur chaque autre
+	 * préproduction du parc, dans le navigateur de qui l'avait visitée. Et il n'y
+	 * a pas de rétractation : le remède est manuel, poste par poste.
+	 */
+	reinitialiser( [ 'base' => 'https://client.anode-staging.fr', 'ssl' => true ] );
+
+	assertSame(
+		'max-age=31536000',
+		filtrer( 'wp_headers', [] )['Strict-Transport-Security'] ?? null
+	);
+} );
+
+test( 'sans TLS, aucun HSTS n’est posé', function (): void {
+	// L'en-tête servi en clair est ignoré par le navigateur, et annoncerait une
+	// garantie que la connexion ne tient pas.
+	reinitialiser( [ 'base' => 'http://exemple.fr', 'ssl' => false ] );
+
+	assertTrue( ! isset( filtrer( 'wp_headers', [] )['Strict-Transport-Security'] ) );
+} );
+
+test( 'un en-tête déjà posé par le serveur n’est pas écrasé', function (): void {
+	reinitialiser( [ 'base' => 'https://exemple.fr', 'ssl' => true ] );
+
+	$entetes = filtrer( 'wp_headers', [ 'Strict-Transport-Security' => 'max-age=63072000; preload' ] );
+
+	assertSame( 'max-age=63072000; preload', $entetes['Strict-Transport-Security'] );
+} );
+
+test( 'une adresse IP littérale n’engage aucun sous-domaine', function (): void {
+	// `explode('.')` y compterait quatre labels, mais la question n'a pas de sens.
+	reinitialiser( [ 'base' => 'https://198.51.100.7', 'ssl' => true ] );
+
+	assertSame( false, engage_les_sous_domaines() );
+} );
+
+test( 'les en-têtes de base sont posés quoi qu’il arrive', function (): void {
+	reinitialiser( [ 'base' => 'http://exemple.fr', 'ssl' => false ] );
+
+	$entetes = filtrer( 'wp_headers', [] );
+
+	assertSame( 'nosniff', $entetes['X-Content-Type-Options'] ?? null );
+	assertSame( 'SAMEORIGIN', $entetes['X-Frame-Options'] ?? null );
 } );
 
 /* --- Compte rendu ---------------------------------------------------- */

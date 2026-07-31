@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Anode — durcissement
  * Description: Sécurité de base sans extension tierce : URL de connexion masquée, limitation des tentatives, en-têtes de sécurité, XML-RPC coupé, énumération des comptes bloquée.
- * Version:     1.3.0
+ * Version:     1.4.0
  * Author:      Anode
  *
  * Remplace SecuPress Pro et WPS Hide Login.
@@ -639,6 +639,37 @@ if ( ! defined( 'DISALLOW_FILE_EDIT' ) ) {
 }
 
 /**
+ * Le site est-il servi depuis le domaine lui-même, et non depuis un
+ * sous-domaine partagé ?
+ *
+ * Ne sert qu'à décider de `includeSubDomains`. La question n'est pas « suis-je
+ * en production » mais « ce que j'engage m'appartient-il en entier » : un site
+ * servi depuis `client.hebergeur.fr` engagerait tous les voisins.
+ *
+ * Le décompte des labels est volontairement grossier — reconnaître un domaine
+ * enregistrable demanderait la liste des suffixes publics, que WordPress n'a
+ * pas. `exemple.co.uk` compte donc trois labels et n'obtient pas
+ * `includeSubDomains`. C'est le bon sens de l'erreur : un faux négatif retire
+ * une protection *supplémentaire* sur des sous-domaines qui posent déjà la
+ * leur ; un faux positif se purge à la main, navigateur par navigateur.
+ */
+function engage_les_sous_domaines(): bool {
+	$host = strtolower( (string) wp_parse_url( home_url(), PHP_URL_HOST ) );
+
+	if ( '' === $host || filter_var( $host, FILTER_VALIDATE_IP ) ) {
+		return false;
+	}
+
+	$labels = explode( '.', $host );
+
+	if ( 'www' === $labels[0] ) {
+		array_shift( $labels );
+	}
+
+	return count( $labels ) <= 2;
+}
+
+/**
  * En-têtes de sécurité HTTP.
  *
  * Ces en-têtes gagnent à être posés par le serveur web — c'est plus rapide et
@@ -657,21 +688,31 @@ add_filter(
 		];
 
 		/*
-		 * HSTS ne se pose qu'en production.
+		 * HSTS ne se pose qu'en production, et `includeSubDomains` seulement
+		 * depuis le domaine lui-même.
 		 *
 		 * L'en-tête engage le navigateur pour un an : il refusera ensuite toute
-		 * connexion en clair vers ce domaine **et ses sous-domaines**. Posé
-		 * depuis une préproduction en `staging.exemple.fr`, il peut donc rendre
-		 * inaccessible un site de développement voisin — et le seul remède est
-		 * d'aller purger la liste HSTS du navigateur à la main, poste par poste.
+		 * connexion en clair vers ce domaine **et ses sous-domaines**. Le seul
+		 * remède est de purger la liste HSTS du navigateur à la main, poste par
+		 * poste — il n'y a pas de rétractation côté serveur.
 		 *
 		 * `wp_get_environment_type()` rend « production » par défaut : une
 		 * installation qui ne déclare rien garde donc l'en-tête. C'est le bon
 		 * sens du doute — une production non déclarée est plus fréquente qu'une
 		 * préproduction non déclarée.
+		 *
+		 * Mais ce doute ne suffisait pas, et c'est mesuré : une préproduction en
+		 * `client.anode-staging.fr`, qui ne déclarait rien, posait un an de HSTS
+		 * `includeSubDomains` sur `anode-staging.fr` — donc sur **chaque autre
+		 * préproduction du parc**, dans le navigateur de qui l'avait visitée.
+		 * L'environnement n'était pas la bonne question : la portée l'était.
+		 * `includeSubDomains` engage un domaine qu'on ne possède en exclusivité
+		 * que si l'on est servi depuis lui.
 		 */
 		if ( is_ssl() && 'production' === wp_get_environment_type() ) {
-			$defaults['Strict-Transport-Security'] = 'max-age=31536000; includeSubDomains';
+			$defaults['Strict-Transport-Security'] = engage_les_sous_domaines()
+				? 'max-age=31536000; includeSubDomains'
+				: 'max-age=31536000';
 		}
 
 		foreach ( $defaults as $name => $value ) {
