@@ -247,9 +247,23 @@ await test('deux ouvertures à 100 ms : la seconde est avalée — le verrou de 
  * 3 bis. Le même geste dans le canevas
  * ================================================================== */
 
-process.stdout.write('\nLe canevas : la sélection décide, et rien n’est coupé\n');
+process.stdout.write('\nLe canevas n’est plus écouté\n');
 
-await test('la sélection est dans une instance : le composant s’ouvre, sans rien couper', async () => {
+await test('un double-clic dans le canevas n’ouvre rien et ne coupe rien', async () => {
+  /*
+   * Le canevas ouvrait aussi un composant. Retiré sur constat d'usage : une fois
+   * **dans** le composant, on ne pouvait plus y sélectionner un élément enfant.
+   *
+   * La cause ne se corrige pas par une garde de plus — trois ont été essayées, et
+   * chacune réparait le symptôme de la précédente. Bricks sélectionne au canevas
+   * l'élément cliqué, pas l'instance qui le porte, et le bouton du panneau
+   * réapparaît pour tout composant imbriqué : chaque double-clic sur un enfant
+   * rouvrait donc quelque chose au lieu de le sélectionner.
+   *
+   * Ce cas vérifie les deux moitiés de la décision : rien ne s'ouvre, **et** rien
+   * n'est coupé. La seconde compte autant — la sélection et l'édition en place
+   * dans le canevas dépendent de gestes qu'on ne doit pas intercepter.
+   */
   const { monde, noeuds } = builderDePoche({ bouton: true });
 
   await respirer();
@@ -258,27 +272,8 @@ await test('la sélection est dans une instance : le composant s’ouvre, sans r
 
   const { annule } = monde.geste(noeuds.cible, 'dblclick');
 
-  affirmerEgal(1, clics(noeuds.bouton), 'le double-clic du canevas n’ouvre rien');
-  affirmer(!annule, 'le canevas coupe un geste : la sélection et l’édition en place en dépendent');
-});
-
-await test('la sélection est hors de toute instance : rien ne s’ouvre', async () => {
-  /*
-   * **La garde du canevas, et le seul endroit où elle s'éprouve.**
-   *
-   * Le bouton est affiché — un composant a été sélectionné juste avant — et la
-   * sélection courante est une ligne ordinaire. Sans la remontée à l'instance, un
-   * double-clic sur un texte du canevas ouvrirait le composant précédent.
-   */
-  const { monde, noeuds } = builderDePoche({ bouton: true });
-
-  await respirer();
-
-  noeuds.ordinaire.classList.add('active');
-
-  monde.geste(noeuds.cible, 'dblclick');
-
-  affirmerEgal(0, clics(noeuds.bouton), 'un composant s’ouvre depuis un élément qui n’est pas dedans');
+  affirmerEgal(0, clics(noeuds.bouton), 'le canevas ouvre encore un composant');
+  affirmer(!annule, 'le canevas coupe un geste : la sélection en dépend');
 });
 
 await test('aucune sélection lisible : on s’abstient plutôt que d’agir au bouton', async () => {

@@ -343,25 +343,28 @@ function code(): string {
  *
  * @param string $lequel « structure » ou « canevas ».
  */
-function gestionnaire( string $lequel ): string {
-	$corps  = code();
-	$canevas = strpos( $corps, 'const ecouterLeCanevas' );
+/**
+ * Le corps du gestionnaire de double-clic.
+ *
+ * Il n'y en a plus qu'un — celui de la structure. La version précédente
+ * découpait le fichier en deux, structure et canevas, parce que les deux
+ * gestionnaires n'avaient pas le droit aux mêmes lectures : le canevas devait
+ * remonter à l'instance, la structure ne le devait pas. Le canevas a été retiré ;
+ * la fonction reste, parce que ce qu'elle protège subsiste — un test qui lirait le
+ * fichier entier confondrait le code de décision avec les commentaires qui
+ * expliquent ce qu'on a cessé de faire.
+ */
+function gestionnaire( string $lequel = 'structure' ): string {
+	$corps = code();
+	$debut = strpos( $corps, "document.addEventListener('dblclick'" );
 
-	if ( false === $canevas ) {
-		throw new \RuntimeException( 'gestionnaire du canevas introuvable : ecouterLeCanevas a disparu' );
+	if ( false === $debut ) {
+		throw new \RuntimeException( 'gestionnaire de double-clic introuvable' );
 	}
 
-	if ( 'canevas' === $lequel ) {
-		return substr( $corps, $canevas );
-	}
+	$fin = strpos( $corps, 'const demarrer', $debut );
 
-	$structure = strpos( $corps, "document.addEventListener('dblclick'" );
-
-	if ( false === $structure || $structure > $canevas ) {
-		throw new \RuntimeException( 'gestionnaire de la structure introuvable, ou passé après celui du canevas' );
-	}
-
-	return substr( $corps, $structure, $canevas - $structure );
+	return false === $fin ? substr( $corps, $debut ) : substr( $corps, $debut, $fin - $debut );
 }
 
 test( 'chaque sélecteur relevé est présent dans le script', function (): void {
@@ -387,8 +390,6 @@ test( 'chaque sélecteur relevé est présent dans le script', function (): void
 		'.active-classes li'                              => 'les classes de l’élément',
 		'#bricks-toolbar input#preview-width'             => 'la largeur du canevas',
 		'#bricks-structure li.element[data-id]'           => 'les lignes de la structure',
-		'#bricks-structure li.element.active'             => 'la ligne sélectionnée',
-		'#bricks-structure li.element.component'          => 'une instance de composant, dans le canevas',
 		'#bricks-panel span.bricks-svg-wrapper.component' => 'le bouton d’édition du composant',
 	];
 
@@ -528,7 +529,7 @@ test( 'le bouton du panneau est le seul juge de ce qui s’ouvre', function (): 
 	 * Ce test épingle donc le mécanisme réel : les deux gestionnaires lisent le
 	 * bouton, et ils n'ont rien d'autre à consulter.
 	 */
-	assert_same( 2, substr_count( code(), 'boutonDuPanneau()' ), 'les deux gestionnaires ne lisent pas le bouton' );
+	assert_same( 1, substr_count( code(), 'boutonDuPanneau()' ), 'le gestionnaire ne lit pas le bouton' );
 
 	// Les deux fonctions de déduction sont retirées, pas corrigées : il n'y a rien à
 	// déduire d'un DOM qui ne porte pas l'information.
@@ -648,46 +649,6 @@ test( 'chaque garde dit où elle est éprouvée', function (): void {
 	);
 } );
 
-test( 'le canevas part de la sélection, et s’abstient sans elle', function (): void {
-	/*
-	 * Le canevas n'a pas de ligne de structure sous le curseur : la 1.4.0 s'y
-	 * contentait de la présence du bouton, sans savoir sur quoi elle agissait.
-	 *
-	 * On lit donc la ligne sélectionnée — le premier des deux clics l'a posée —, puis
-	 * on remonte à l'instance qui la porte, parce que Bricks sélectionne l'élément
-	 * cliqué. Cette remontée est la garde de niveau de page, équivalent exact de la
-	 * lecture de classe du côté structure.
-	 */
-	$canevas = gestionnaire( 'canevas' );
-
-	assert_true( str_contains( $canevas, 'ligneActive()' ), 'la sélection n’est plus lue depuis le canevas' );
-	assert_true(
-		str_contains( $canevas, 'if (!dansUneInstance(ligneActive())) return;' ),
-		'le canevas n’écarte plus un double-clic sur un élément hors composant'
-	);
-
-	/*
-	 * **Une seule condition, et c'est un correctif de couverture.**
-	 *
-	 * Un `if (!active) return;` séparé la précédait, pour dire l'abstention sans
-	 * sélection lisible — structure repliée, panneau pas encore rendu. Il était
-	 * strictement inerte : `dansUneInstance(null)` rend déjà `false`. Retiré du
-	 * fichier servi, il ne faisait tomber aucun cas, ni en ligne ni dans le DOM de
-	 * poche — la seule des dix mutations à ne rien casser.
-	 *
-	 * On ne garde donc pas une branche qu'aucune mesure n'atteint : elle se lirait
-	 * comme un filet éprouvé alors qu'elle n'est rien. Ce test interdit son retour,
-	 * et le commentaire du script porte l'intention à sa place.
-	 */
-	assert_true(
-		! str_contains( $canevas, 'if (!active) return;' ),
-		'une branche inerte est de retour dans le canevas : dansUneInstance(null) rend déjà false, aucune mesure'
-		. ' ne la distingue de son absence'
-	);
-
-	// Et il lit le bouton, comme la structure : c'est lui qui tranche des deux côtés.
-	assert_true( str_contains( $canevas, 'boutonDuPanneau()' ), 'le canevas ne consulte plus le bouton' );
-} );
 
 test( 'le canevas ne coupe aucun geste', function (): void {
 	/*
@@ -700,29 +661,31 @@ test( 'le canevas ne coupe aucun geste', function (): void {
 	assert_same( 1, substr_count( code(), 'stopImmediatePropagation' ), 'un blocage a été ajouté hors de la structure' );
 } );
 
-test( 'la remontée du canevas ne peut pas boucler', function (): void {
-	/*
-	 * La version précédente remontait par `data-parent-id`, d'une ligne à l'autre, et
-	 * devait donc se borner à cinquante niveaux : un attribut incohérent — une ligne
-	 * qui se déclare son propre parent le temps d'un glisser-déposer — aurait figé le
-	 * builder sur un double-clic.
-	 *
-	 * `closest` supprime la borne **et** ce qu'elle protégeait : il remonte
-	 * l'imbrication réelle du DOM, qui ne peut pas être cyclique. Vérifié dans le
-	 * builder : la structure est bien imbriquée, et le repli par attribut ne servait
-	 * jamais.
-	 */
-	assert_true(
-		str_contains( code(), "closest?.('#bricks-structure li.element.component')" ),
-		'la remontée du canevas a disparu'
-	);
 
-	foreach ( [ 'profondeur', 'for (let courante' ] as $boucle ) {
+test( 'le canevas n’est plus écouté, et ne doit pas revenir', function (): void {
+	/*
+	 * Le double-clic y ouvrait aussi un composant. Retiré sur constat d'usage : une
+	 * fois **dans** le composant, il devenait impossible d'y sélectionner un élément
+	 * enfant au canevas.
+	 *
+	 * La cause est de forme, et elle ne se corrige pas par une garde de plus — trois
+	 * ont été essayées, chacune réparant le symptôme de la précédente. Bricks
+	 * sélectionne au canevas l'élément cliqué et non l'instance qui le porte, et le
+	 * bouton du panneau réapparaît pour tout composant imbriqué : chaque double-clic
+	 * sur un enfant rouvrait donc quelque chose au lieu de le sélectionner.
+	 *
+	 * Ce test interdit le retour de l'écouteur. Un seul chemin d'entrée, dans la
+	 * structure, vaut mieux que deux dont l'un est piégé.
+	 */
+	foreach ( [ 'ecouterLeCanevas', 'suivreLeCanevas', 'contentWindow', 'dansUneInstance' ] as $trace ) {
 		assert_true(
-			! str_contains( code(), $boucle ),
-			"une remontée à la main est de retour ({$boucle}) : elle demande une borne que closest rend inutile"
+			! str_contains( code(), $trace ),
+			sprintf( 'le volet canevas est de retour : %s', $trace )
 		);
 	}
+
+	// Un seul gestionnaire de double-clic, et il vise la structure.
+	assert_same( 1, substr_count( code(), "addEventListener('dblclick'" ), 'nombre de gestionnaires' );
 } );
 
 test( 'trois clics rapides ne produisent qu’une seule action', function (): void {
@@ -730,7 +693,7 @@ test( 'trois clics rapides ne produisent qu’une seule action', function (): vo
 	// retombait sur le gestionnaire avant que le panneau ait basculé, donc sur un
 	// bouton encore présent, et faisait ressortir aussitôt.
 	assert_true( str_contains( code(), 'tropTot' ), 'le verrou de temps a disparu' );
-	assert_same( 2, substr_count( code(), 'tropTot()' ), 'le verrou ne protège pas les deux gestionnaires' );
+	assert_same( 1, substr_count( code(), 'tropTot()' ), 'le verrou ne protège plus le gestionnaire' );
 } );
 
 test( 'le double-clic ne devance Bricks que s’il a de quoi ouvrir', function (): void {
@@ -753,15 +716,6 @@ test( 'le double-clic ne devance Bricks que s’il a de quoi ouvrir', function (
 	);
 } );
 
-test( 'le double-clic agit aussi dans le canevas', function (): void {
-	// C'est là qu'on passe le plus clair de son temps ; ne l'avoir que dans la
-	// structure, c'est ne l'avoir qu'à moitié.
-	assert_true( str_contains( code(), 'ecouterLeCanevas' ), 'le canevas n’est plus écouté' );
-
-	// L'iframe est remplacée à chaque rechargement du canevas : un écouteur posé
-	// une seule fois disparaîtrait avec elle, sans rien dire.
-	assert_true( str_contains( code(), "addEventListener('load'" ), 'l’écouteur n’est pas reposé au rechargement' );
-} );
 
 test( 'une désélection volontaire est retenue', function (): void {
 	/*

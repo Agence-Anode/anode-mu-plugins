@@ -33,13 +33,15 @@
  * pas dans un vrai builder — elles se prouvent dans
  * `tests/test-decision.mjs`, qui pose l'état que Bricks ne produit pas.
  *
- * **Une quatrième abstention a été retirée, et la distinction vaut d'être tenue.**
- * Le canevas commençait par `if (!active) return;` avant de remonter à l'instance.
- * Les trois gardes ci-dessus se prouvent quelque part ; celle-là, nulle part —
- * `dansUneInstance(null)` rend déjà `false`, et aucune mesure, dans aucun DOM, ne
- * peut distinguer sa présence de son absence. Un filet se choisit ; une branche
- * qu'aucun test n'atteint se lit seulement comme un filet. L'intention est donc
- * énoncée à l'endroit où on la lit, sans code pour la mimer.
+ * **Le double-clic n'agit que dans la structure, plus dans le canevas.**
+ * Il y agissait, et c'est retiré : une fois **dans** un composant, il devenait
+ * impossible d'y sélectionner un élément enfant. Bricks sélectionne au canevas
+ * l'élément cliqué et non l'instance qui le porte, et le bouton du panneau
+ * réapparaît pour tout composant imbriqué — chaque double-clic sur un enfant
+ * rouvrait donc quelque chose au lieu de le sélectionner. Trois gardes
+ * successives ont échoué là-dessus, chacune corrigeant le symptôme de la
+ * précédente. Un seul chemin d'entrée, dans la structure, vaut mieux que deux
+ * dont l'un est piégé.
  *
  * Chaque fonction est isolée : celle qui échoue n'emporte pas les autres, et un
  * point d'accroche disparu la rend inerte plutôt que bruyante.
@@ -390,25 +392,6 @@
      */
     const selecteurLigne = '#bricks-structure li.element[data-id]';
 
-    const ligneActive = () => document.querySelector('#bricks-structure li.element.active');
-
-    /**
-     * La sélection est-elle dans une instance de composant ?
-     *
-     * Sert au **canevas** seulement, et pour une raison de forme : Bricks y
-     * sélectionne l'élément cliqué, pas l'instance qui le porte. La ligne active
-     * est donc un enfant, et c'est en remontant qu'on sait si l'on a affaire à un
-     * composant. `closest` suffit — les lignes de la structure sont réellement
-     * imbriquées dans le DOM (vérifié), et une remontée par attribut demandait une
-     * borne de profondeur contre une boucle que celle-ci ne peut pas faire.
-     *
-     * Comme la classe `component`, cette lecture n'est fiable qu'au niveau de la
-     * page. C'est une garde, pas une décision : le bouton tranche — et dans ce
-     * Bricks, il tranche seul. Retirée du fichier servi, elle ne fait bouger aucun
-     * cas du harnais en ligne ; c'est `tests/test-decision.mjs` qui l'éprouve, en
-     * posant une sélection hors instance avec le bouton affiché.
-     */
-    const dansUneInstance = (ligne) => ligne?.closest?.('#bricks-structure li.element.component') != null;
 
     /*
      * Un verrou de temps, en plus.
@@ -503,74 +486,23 @@
     }, true);
 
     /*
-     * Le même geste dans le canevas, où l'on passe le plus clair de son temps.
+     * Rien dans le canevas, et c'est une décision, pas un oubli.
      *
-     * Le canevas est une iframe de même origine : on peut y écouter. Il n'y a rien
-     * à devancer — aucun « renommer » au double-clic — donc **aucun**
-     * `preventDefault` ici : la sélection, le déplacement et l'édition en place
-     * doivent se comporter exactement comme sans nous.
+     * Le double-clic y ouvrait aussi un composant. Retiré : une fois **dans** le
+     * composant, il devenait impossible de sélectionner un élément enfant au
+     * canevas. La cause est de forme — Bricks y sélectionne l'élément cliqué, pas
+     * l'instance qui le porte, et le bouton du panneau réapparaît pour tout
+     * composant imbriqué : chaque double-clic sur un enfant rouvrait donc quelque
+     * chose au lieu de le sélectionner.
      *
-     * Ce qui manque, en revanche, c'est la ligne de structure sous le curseur. On
-     * la retrouve par la **sélection** : le premier des deux clics l'a posée, et
-     * Bricks met la structure en correspondance. Sans elle — structure repliée,
-     * panneau pas encore rendu — on s'abstient : on ne saurait pas sur quoi on
-     * agit, et agir « au bouton » sans rien savoir est ce qui a rendu la fonction
-     * nuisible en 1.4.0.
+     * Trois tentatives de garde ont échoué là-dessus, chacune corrigeant le
+     * symptôme précédent et en créant un autre. La structure, elle, n'a jamais posé
+     * ce problème : on y voit les lignes, on sait laquelle est un composant, et
+     * Bricks n'y a qu'un seul geste concurrent — le renommage, qu'on devance
+     * proprement.
+     *
+     * Un seul chemin d'entrée vaut mieux que deux dont un est piégé.
      */
-    const ecouterLeCanevas = (fenetre) => {
-      if (!fenetre?.document || fenetre.document.anodeBuilderEcoute) return;
-
-      fenetre.document.anodeBuilderEcoute = true;
-
-      fenetre.document.addEventListener('dblclick', (evenement) => {
-        if (evenement.target.closest?.('input, textarea, [contenteditable="true"]')) return;
-
-        /*
-         * Une seule condition, et deux raisons de s'abstenir tenues par elle.
-         *
-         * La sélection porte sur l'élément cliqué, pas sur l'instance : on remonte.
-         * Au niveau de la page, cela écarte un double-clic ordinaire sur un texte ou
-         * une image ; en édition, la lecture laisse passer, et c'est le bouton qui
-         * tranche.
-         *
-         * Et **aucune sélection lisible** — structure repliée, panneau pas encore
-         * rendu — s'y range : `dansUneInstance(null)` rend `false`, donc on
-         * s'abstient au lieu d'agir « au bouton » sans savoir sur quoi, ce qui est
-         * exactement ce qui a rendu la fonction nuisible en 1.4.0.
-         *
-         * Un `if (!ligneActive()) return` séparé a précédé celle-ci. Il énonçait
-         * cette seconde raison à l'endroit où on la lit, mais aucun test ne pouvait
-         * distinguer sa présence de son absence — vérifié par mutation, il était la
-         * seule des dix à ne faire tomber aucun cas. Une branche qu'aucune mesure
-         * n'atteint n'est pas un filet : c'est du code qu'on croit éprouvé. Elle est
-         * donc dite ici plutôt qu'écrite deux fois.
-         */
-        if (!dansUneInstance(ligneActive())) return;
-
-        const bouton = boutonDuPanneau();
-
-        if (!bouton || tropTot()) return;
-
-        cliquer(bouton);
-      }, true);
-    };
-
-    /*
-     * L'iframe est remplacée à chaque rechargement du canevas — après un
-     * enregistrement, un changement de point de rupture, une régénération du CSS.
-     * Un écouteur posé une fois disparaîtrait avec elle, et la fonction cesserait
-     * de marcher sans rien dire. On le repose donc à chaque `load`.
-     */
-    const suivreLeCanevas = async () => {
-      const cadre = await attendre('iframe#bricks-builder-iframe, #bricks-preview iframe, iframe');
-
-      if (!cadre) return;
-
-      ecouterLeCanevas(cadre.contentWindow);
-      cadre.addEventListener('load', () => ecouterLeCanevas(cadre.contentWindow));
-    };
-
-    suivreLeCanevas();
   };
 
   /* ------------------------------------------------------------------ */

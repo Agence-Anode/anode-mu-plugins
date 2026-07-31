@@ -1,8 +1,8 @@
 <?php
 /**
  * Plugin Name: Anode — confort du builder
- * Description: Trois manques de Bricks Builder, comblés sans extension tierce : la classe active reste sélectionnée, un curseur balaie les largeurs au pixel, et un double-clic ouvre un composant.
- * Version:     1.5.3
+ * Description: Trois manques de Bricks Builder, comblés sans extension tierce : la classe active reste sélectionnée, un curseur balaie les largeurs au pixel, et un double-clic dans la structure ouvre un composant.
+ * Version:     2.0.0
  * Author:      Anode
  * Requires PHP: 8.1
  *
@@ -25,9 +25,16 @@
  * saisir une valeur, regarder, en saisir une autre. Un curseur balaie, avec un
  * repère par point de rupture.
  *
- * **Le double-clic sur un composant.** Ouvrir un composant depuis la structure
- * demande un clic droit puis « Modifier le composant ». Le double-clic fait le
- * même chemin — celui de Bricks, pas un raccourci maison.
+ * **Le double-clic sur un composant, dans la structure.** L'ouvrir demande sinon
+ * un clic droit puis « Modifier le composant ». Le double-clic fait le même
+ * chemin — celui de Bricks, pas un raccourci maison.
+ *
+ * Il agissait aussi dans le **canevas**, et c'est retiré en 2.0.0 : une fois dans
+ * le composant, on ne pouvait plus y sélectionner un élément enfant. Bricks y
+ * sélectionne l'élément cliqué et non l'instance qui le porte, et le bouton du
+ * panneau réapparaît pour tout composant imbriqué — chaque double-clic sur un
+ * enfant rouvrait donc quelque chose. Un seul chemin d'entrée, dans la
+ * structure, vaut mieux que deux dont l'un est piégé.
  *
  * ## Ce que ce composant ne fait pas
  *
