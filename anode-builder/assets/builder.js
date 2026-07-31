@@ -106,12 +106,39 @@
     const laissees = new Set();
     let dernierElement = null;
 
-    const elementCourant = () => document
-      .querySelector('#bricks-structure li.element.active')
-      ?.getAttribute('data-id') ?? null;
-
     const pastilles = () => [...document.querySelectorAll('.active-classes li')]
       .filter((li) => li.matches('[data-class-id]') || li.querySelector('[data-class-id]'));
+
+    const identifiantDe = (li) => li.getAttribute('data-class-id')
+      ?? li.querySelector('[data-class-id]')?.getAttribute('data-class-id')
+      ?? '';
+
+    /**
+     * Ce qui identifie « l'élément qu'on regarde », sans le panneau de structure.
+     *
+     * La première version prenait le `data-id` de `#bricks-structure li.active`.
+     * Elle marchait à la souris dans la structure et **pas** dans le canevas : là,
+     * la ligne correspondante peut n'être pas rendue du tout — panneau replié,
+     * parent fermé — et la clé valait alors `null`, donc rien ne se passait. C'est
+     * ce qui donnait « ça ne marche qu'à partir du deuxième élément » : le
+     * deuxième clic tombait sur une structure entre-temps déployée.
+     *
+     * On se rabat donc sur la liste des classes elle-même, qui existe dès qu'un
+     * élément est sélectionné, d'où qu'on l'ait sélectionné. La structure reste
+     * consultée quand elle est là : elle distingue deux éléments qui portent
+     * exactement les mêmes classes.
+     */
+    const elementCourant = () => {
+      const parLaStructure = document
+        .querySelector('#bricks-structure li.element.active')
+        ?.getAttribute('data-id');
+
+      if (parLaStructure) return parLaStructure;
+
+      const liste = pastilles();
+
+      return liste.length ? liste.map(identifiantDe).join('|') : null;
+    };
 
     const activer = () => {
       const element = elementCourant();
@@ -369,6 +396,49 @@
 
       cliquer(bouton);
     }, true);
+
+    /*
+     * Le même geste dans le canevas, où l'on passe le plus clair de son temps.
+     *
+     * Le canevas est une iframe de même origine : on peut y écouter. Et le
+     * raisonnement s'y simplifie — il n'y a pas de « ligne de composant » à
+     * reconnaître, ni de « renommer » à devancer. On laisse Bricks sélectionner ce
+     * qu'on vient de double-cliquer, puis on regarde si le panneau propose
+     * d'ouvrir un composant. S'il le propose, c'est que la sélection en fait
+     * partie ; sinon on n'a rien fait.
+     */
+    const ecouterLeCanevas = (fenetre) => {
+      if (!fenetre?.document || fenetre.document.anodeBuilderEcoute) return;
+
+      fenetre.document.anodeBuilderEcoute = true;
+
+      fenetre.document.addEventListener('dblclick', async (evenement) => {
+        if (evenement.target.closest?.('input, textarea, [contenteditable="true"]')) return;
+
+        const bouton = await patienter(boutonDuPanneau, 1200);
+
+        if (!bouton) return;
+
+        cliquer(bouton);
+      }, true);
+    };
+
+    /*
+     * L'iframe est remplacée à chaque rechargement du canevas — après un
+     * enregistrement, un changement de point de rupture, une régénération du CSS.
+     * Un écouteur posé une fois disparaîtrait avec elle, et la fonction cesserait
+     * de marcher sans rien dire. On le repose donc à chaque `load`.
+     */
+    const suivreLeCanevas = async () => {
+      const cadre = await attendre('iframe#bricks-builder-iframe, #bricks-preview iframe, iframe');
+
+      if (!cadre) return;
+
+      ecouterLeCanevas(cadre.contentWindow);
+      cadre.addEventListener('load', () => ecouterLeCanevas(cadre.contentWindow));
+    };
+
+    suivreLeCanevas();
   };
 
   /* ------------------------------------------------------------------ */

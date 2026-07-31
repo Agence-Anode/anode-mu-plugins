@@ -428,6 +428,35 @@ test( 'un panneau encore vide n’est pas pris pour un élément sans classes', 
 	);
 } );
 
+test( 'l’élément est identifié même sans le panneau de structure', function (): void {
+	/*
+	 * Le défaut constaté deux fois de suite à l'usage. La clé venait du `data-id`
+	 * de la ligne active de la structure : elle existe quand on sélectionne
+	 * **dans** la structure, et pas forcément quand on sélectionne dans le
+	 * canevas — panneau replié, parent fermé, la ligne n'est pas rendue. La clé
+	 * valait alors `null`, et rien ne se passait ; au clic suivant la structure
+	 * s'était déployée, d'où « ça ne marche qu'à partir du deuxième élément ».
+	 */
+	assert_true(
+		str_contains( code(), 'parLaStructure' ),
+		'la structure n’est plus un simple raffinement de la clé'
+	);
+	assert_true(
+		str_contains( code(), 'liste.map(identifiantDe)' ),
+		'il n’y a plus de repli sur la liste des classes'
+	);
+} );
+
+test( 'le double-clic agit aussi dans le canevas', function (): void {
+	// C'est là qu'on passe le plus clair de son temps ; ne l'avoir que dans la
+	// structure, c'est ne l'avoir qu'à moitié.
+	assert_true( str_contains( code(), 'ecouterLeCanevas' ), 'le canevas n’est plus écouté' );
+
+	// L'iframe est remplacée à chaque rechargement du canevas : un écouteur posé
+	// une seule fois disparaîtrait avec elle, sans rien dire.
+	assert_true( str_contains( code(), "addEventListener('load'" ), 'l’écouteur n’est pas reposé au rechargement' );
+} );
+
 test( 'une désélection volontaire est retenue', function (): void {
 	/*
 	 * Le piège de cette fonction : ré-activer aussitôt une classe que
