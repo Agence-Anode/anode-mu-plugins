@@ -200,6 +200,30 @@ function wp_get_environment_type(): string {
 
 	return (string) ( $etat['environnement'] ?? 'production' );
 }
+/**
+ * `WP_Error`, réduite à ce que le durcissement en consulte : son code.
+ *
+ * **Aliasée dans l'espace global**, parce que le composant écrit `new \WP_Error(…)`
+ * pour refuser une connexion verrouillée : une doublure rangée dans le namespace
+ * laisserait ce chemin sans doublure, et c'est le plus sensible du fichier.
+ */
+class ErreurWp {
+	public function __construct( private string $code = '', private string $message = '' ) {}
+
+	public function get_error_code(): string {
+		return $this->code;
+	}
+
+	public function get_error_message(): string {
+		return $this->message;
+	}
+}
+
+class_alias( ErreurWp::class, 'WP_Error' );
+
+function is_wp_error( $chose ): bool {
+	return $chose instanceof \WP_Error;
+}
 function status_header(): void {}
 function nocache_headers(): void {}
 function get_404_template(): string {
@@ -242,6 +266,29 @@ function rejouer( string $accroche, int $rang = 0 ): void {
 	}
 
 	$rappel();
+}
+
+/**
+ * Rejoue une fermeture **avec ses arguments**.
+ *
+ * `rejouer()` appelle sans rien : suffisant tant qu'aucune accroche ne lisait ce
+ * que WordPress lui passe. Ce n'est plus vrai — l'échec d'un mot de passe
+ * d'application porte son motif, et c'est de lui que dépend la décision de
+ * compter. Sans ce passeur, on n'éprouverait que la fonction de décision, pas son
+ * câblage : une accroche qui ignorerait l'argument passerait au vert.
+ *
+ * @param list<mixed> $arguments
+ */
+function rejouer_avec( string $accroche, array $arguments, int $rang = 0 ): void {
+	global $accroches_enregistrees;
+
+	$rappel = $accroches_enregistrees[ $accroche ][ $rang ] ?? null;
+
+	if ( ! is_callable( $rappel ) ) {
+		throw new \RuntimeException( "aucune fermeture enregistrée sur « {$accroche} » au rang {$rang}" );
+	}
+
+	$rappel( ...$arguments );
 }
 
 /**
@@ -482,6 +529,79 @@ test( 'la clé du compteur ne laisse pas fuiter l’adresse', function (): void 
 
 test( 'deux adresses donnent deux clés différentes', function (): void {
 	assertTrue( attempt_key( '198.51.100.7' ) !== attempt_key( '203.0.113.9' ) );
+} );
+
+test( 'les identifiants d’une autre porte ne ferment pas le verrou', function (): void {
+	/*
+	 * Le défaut mesuré, et il coupait le pilotage du site.
+	 *
+	 * Sur une préproduction protégée par `.htpasswd`, le navigateur présente les
+	 * identifiants du serveur sur chaque requête — appels REST de Bricks compris.
+	 * WordPress y voyait autant de tentatives de mot de passe d'application, et le
+	 * verrou se fermait au bout de cinq requêtes : `wp_is_application_passwords_available()`
+	 * passait à `false`, le MCP répondait « Permissions insuffisantes », et un harnais
+	 * en cours perdait le moyen de retirer son décor. Un aller-retour dans le builder
+	 * suffisait à l'obtenir.
+	 *
+	 * Le nom présenté ne désigne aucun compte : aucun mot de passe n'est vérifié, il
+	 * n'y a donc rien à forcer. Le seuil est franchi trois fois ici — un `>=` mal placé
+	 * ne passerait pas au vert par marge.
+	 */
+	reinitialiser();
+
+	$_SERVER['REMOTE_ADDR'] = '198.51.100.7';
+
+	for ( $essai = 0; $essai < MAX_LOGIN_ATTEMPTS + 3; $essai++ ) {
+		rejouer_avec( 'application_password_failed_authentication', [ new \WP_Error( 'invalid_username', '' ) ] );
+	}
+
+	assertTrue( ! is_locked_out(), 'les identifiants du .htpasswd ont fermé le verrou du site' );
+
+	// Et l'adresse électronique inconnue, l'autre forme du même refus : WordPress
+	// accepte les deux, et n'en signale qu'une à la fois.
+	for ( $essai = 0; $essai < MAX_LOGIN_ATTEMPTS + 3; $essai++ ) {
+		rejouer_avec( 'application_password_failed_authentication', [ new \WP_Error( 'invalid_email', '' ) ] );
+	}
+
+	assertTrue( ! is_locked_out(), 'une adresse inconnue est comptée comme une tentative' );
+} );
+
+test( 'un mot de passe faux sur un compte existant ferme le verrou', function (): void {
+	/*
+	 * L'autre moitié, sans laquelle le correctif ci-dessus serait un désarmement :
+	 * le forçage d'un mot de passe d'application exige un compte existant, et c'est
+	 * exactement ce cas que WordPress signale par `incorrect_password`.
+	 */
+	reinitialiser();
+
+	$_SERVER['REMOTE_ADDR'] = '198.51.100.7';
+
+	for ( $essai = 1; $essai < MAX_LOGIN_ATTEMPTS; $essai++ ) {
+		rejouer_avec( 'application_password_failed_authentication', [ new \WP_Error( 'incorrect_password', '' ) ] );
+
+		assertTrue( ! is_locked_out(), "verrouillé dès le {$essai}ᵉ essai" );
+	}
+
+	rejouer_avec( 'application_password_failed_authentication', [ new \WP_Error( 'incorrect_password', '' ) ] );
+
+	assertTrue( is_locked_out(), 'l’API REST n’est plus gardée : c’est la porte que ce composant a été écrit pour fermer' );
+} );
+
+test( 'un échec sans motif lisible compte quand même', function (): void {
+	/*
+	 * Une version de WordPress qui n'enverrait pas l'erreur, ou l'enverrait
+	 * autrement, ne doit pas désarmer le compteur en silence : mieux vaut un verrou
+	 * de trop qu'une porte ouverte.
+	 */
+	reinitialiser();
+
+	$_SERVER['REMOTE_ADDR'] = '198.51.100.7';
+
+	for ( $essai = 0; $essai < MAX_LOGIN_ATTEMPTS; $essai++ ) {
+		rejouer_avec( 'application_password_failed_authentication', [ null ] );
+	}
+
+	assertTrue( is_locked_out(), 'un échec sans motif a désarmé le compteur' );
 } );
 
 test( 'une adresse absente ne fait pas tomber le compteur', function (): void {

@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Anode — durcissement
  * Description: Sécurité de base sans extension tierce : URL de connexion masquée, limitation des tentatives, en-têtes de sécurité, XML-RPC coupé, énumération des comptes bloquée.
- * Version:     1.4.0
+ * Version:     1.4.1
  * Author:      Anode
  *
  * Remplace SecuPress Pro et WPS Hide Login.
@@ -388,10 +388,52 @@ add_filter(
  */
 add_action(
 	'application_password_failed_authentication',
-	static function (): void {
+	static function ( $erreur = null ): void {
+		if ( ! tentative_a_compter( $erreur ) ) {
+			return;
+		}
+
 		record_failed_attempt();
 	}
 );
+
+/**
+ * Un échec de mot de passe d'application est-il une tentative de forçage ?
+ *
+ * **Tous ne le sont pas, et compter les autres coupait le pilotage du site.**
+ * Mesuré sur une préproduction protégée par un `.htpasswd` : le navigateur y
+ * présente les identifiants du serveur sur **chaque** requête, y compris les
+ * appels REST de Bricks. WordPress reçoit alors un `Authorization: Basic` dont le
+ * nom n'est pas un compte du site, tente le mot de passe d'application, échoue —
+ * et le verrou se fermait au bout de cinq requêtes. Conséquences constatées :
+ * `wp_is_application_passwords_available()` passait à `false`, le serveur MCP
+ * répondait « Permissions insuffisantes », et un harnais en cours perdait le moyen
+ * de retirer son décor. Un simple aller-retour dans le builder suffisait.
+ *
+ * Ce qui est écarté : un **nom de compte inconnu**. Aucun mot de passe n'y est
+ * vérifié — le forçage d'un mot de passe d'application exige un compte existant,
+ * et c'est justement ce qui reste compté. La protection ne perd rien ; elle cesse
+ * de se déclencher sur les identifiants d'une autre porte.
+ *
+ * Corollaire à retenir pour un site protégé au niveau du serveur : **l'utilisateur
+ * du `.htpasswd` ne doit pas porter le nom d'un compte WordPress**, sans quoi ses
+ * requêtes redeviennent des tentatives comptées.
+ *
+ * Sans motif lisible, on compte : mieux vaut un verrou de trop qu'une porte
+ * ouverte, et une version de WordPress qui n'enverrait pas l'erreur ne doit pas
+ * désarmer le compteur en silence.
+ *
+ * @param mixed $erreur L'erreur passée par WordPress à l'action.
+ */
+function tentative_a_compter( $erreur ): bool {
+	if ( ! is_wp_error( $erreur ) ) {
+		return true;
+	}
+
+	// `invalid_username` et `invalid_email` : le nom présenté ne désigne aucun
+	// compte. Les deux existent parce que WordPress accepte l'un ou l'autre.
+	return ! in_array( $erreur->get_error_code(), [ 'invalid_username', 'invalid_email' ], true );
+}
 
 add_filter(
 	'wp_is_application_passwords_available',
