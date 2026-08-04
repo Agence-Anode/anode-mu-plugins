@@ -17,6 +17,12 @@ declare( strict_types = 1 );
 define( 'ABSPATH', __DIR__ );
 define( 'HOUR_IN_SECONDS', 3600 );
 
+// Le retour en arrière raisonne sur des chemins, jamais sur des fichiers réels :
+// la racine n'a donc pas besoin d'exister. Elle porte tout de même un nom
+// improbable, pour qu'une erreur de branchement du faux système de fichiers se
+// solde par un chemin visiblement faux plutôt que par une écriture quelque part.
+define( 'WPMU_PLUGIN_DIR', '/anode-updater-test/mu-plugins' );
+
 /* --- Stubs WordPress ------------------------------------------------ */
 
 $GLOBALS['anode_actions'] = [];
@@ -29,6 +35,10 @@ function add_action( string $hook, $callback, int $priority = 10 ): bool {
 
 function apply_filters( string $hook, $value ) {
 	return $value;
+}
+
+function trailingslashit( string $chemin ): string {
+	return rtrim( $chemin, '/\\' ) . '/';
 }
 
 /**
@@ -312,6 +322,156 @@ test( 'le dossier de transit reste invisible pour le chargeur de mu-plugins', fu
 	rmdir( $racine );
 
 	assert_same( [ 'anode-cache' ], $vus, 'le dossier de transit est visible du chargeur :' );
+} );
+
+/* ------------------------------------------------------------------ */
+
+echo "\nRetour en arrière après une sonde en échec\n";
+
+/**
+ * Un système de fichiers en mémoire, réduit à ce que `restaurer()` appelle.
+ *
+ * Il n'y a rien à écrire sur le disque : le retour en arrière est une suite de
+ * renommages, et ce qu'on veut éprouver c'est **l'ordre** de ces renommages et
+ * ce qui reste en place quand l'un d'eux échoue. Un vrai dossier temporaire
+ * rendrait le test plus lent sans rien prouver de plus — et il ne saurait pas
+ * simuler un `move()` qui refuse, qui est précisément le cas dangereux.
+ *
+ * `move()` et `delete()` rendent un booléen, comme `WP_Filesystem` : c'est la
+ * distinction que l'installateur fait ailleurs entre ces méthodes et
+ * `copy_dir()`, qui rend un `WP_Error`.
+ */
+final class Faux_Filesystem {
+
+	/** @var array<string, true> Dossiers existants, indexés par chemin. */
+	public array $dossiers = [];
+
+	/** @var string[] Suite des opérations, dans l'ordre. */
+	public array $journal = [];
+
+	/** @var string[] Sources dont le déplacement doit échouer. */
+	public array $refus = [];
+
+	/** @param string[] $dossiers */
+	public function __construct( array $dossiers ) {
+		foreach ( $dossiers as $chemin ) {
+			$this->dossiers[ $chemin ] = true;
+		}
+	}
+
+	public function is_dir( string $chemin ): bool {
+		return isset( $this->dossiers[ $chemin ] );
+	}
+
+	public function delete( string $chemin, bool $recursif = false ): bool {
+		$this->journal[] = "delete {$chemin}";
+
+		if ( ! isset( $this->dossiers[ $chemin ] ) ) {
+			return false;
+		}
+
+		unset( $this->dossiers[ $chemin ] );
+
+		return true;
+	}
+
+	public function move( string $de, string $vers, bool $ecraser = false ): bool {
+		$this->journal[] = "move {$de} → {$vers}";
+
+		if ( in_array( $de, $this->refus, true ) || ! isset( $this->dossiers[ $de ] ) ) {
+			return false;
+		}
+
+		unset( $this->dossiers[ $de ] );
+		$this->dossiers[ $vers ] = true;
+
+		return true;
+	}
+
+	/** @return string[] Chemins existants, triés, pour une comparaison stable. */
+	public function etat(): array {
+		$chemins = array_keys( $this->dossiers );
+		sort( $chemins );
+
+		return $chemins;
+	}
+}
+
+$racine  = trailingslashit( WPMU_PLUGIN_DIR );
+$cible   = $racine . 'anode-cache';
+$rebut   = $racine . '.anode-cache-refusee';
+$sauve   = $racine . '.anode-cache-1.3.0';
+
+/** Appelle le retour en arrière, privé à dessein, sur un faux disque. */
+function restaurer( Faux_Filesystem $disque, ?string $precedente ): bool {
+	$GLOBALS['wp_filesystem'] = $disque;
+
+	$methode = new \ReflectionMethod( Installateur::class, 'restaurer' );
+	$methode->setAccessible( true );
+
+	return (bool) $methode->invoke( null, 'anode-cache', $precedente );
+}
+
+test( 'la version précédente reprend sa place, et la fautive quitte le champ du chargeur', function () use ( $cible, $rebut, $sauve ): void {
+	// Le cas nominal, et le seul qui compte vraiment : la sonde a constaté que le
+	// site ne répond plus avec la nouvelle version. Si ce chemin ne remet pas
+	// l'ancienne, le site d'un client reste en panne jusqu'à ce qu'on le voie.
+	$disque = new Faux_Filesystem( [ $cible, $sauve ] );
+
+	assert_that( restaurer( $disque, $sauve ), 'le retour en arrière doit réussir' );
+	assert_same( [ $cible ], $disque->etat(), 'après remise en place :' );
+
+	// L'ordre est la garantie : la fautive est écartée **avant** que l'ancienne
+	// revienne. Déplacer l'ancienne d'abord échouerait, la cible étant occupée.
+	assert_same(
+		[ "delete {$rebut}", "move {$cible} → {$rebut}", "move {$sauve} → {$cible}", "delete {$rebut}" ],
+		$disque->journal,
+		'ordre des opérations :'
+	);
+} );
+
+test( 'sans version précédente, la fautive est retirée et le retour est tenu pour fait', function () use ( $cible, $sauve ): void {
+	// Première installation d'un composant : il n'y a rien à remettre. Laisser en
+	// place une version dont on vient de constater qu'elle tue le site serait le
+	// pire des deux mondes — le composant n'existait pas la veille.
+	$disque = new Faux_Filesystem( [ $cible ] );
+
+	assert_that( restaurer( $disque, null ), 'retirer la fautive est un retour en arrière réussi' );
+	assert_same( [], $disque->etat(), 'plus rien ne doit subsister :' );
+} );
+
+test( 'si l’ancienne ne peut pas revenir, la fautive est remise plutôt qu’un vide', function () use ( $cible, $rebut, $sauve ): void {
+	// Un site sans `anode-hardening` ni `anode-seo` du tout est pire qu'un site
+	// avec la version fautive : celle-ci est au moins nommée dans l'erreur.
+	$disque        = new Faux_Filesystem( [ $cible, $sauve ] );
+	$disque->refus = [ $sauve ];
+
+	assert_that( ! restaurer( $disque, $sauve ), 'un retour en arrière manqué doit se dire faux' );
+	assert_same( [ $sauve, $cible ], $disque->etat(), 'la fautive doit être remise, la sauvegarde intacte :' );
+	assert_that( ! in_array( "delete {$rebut}", array_slice( $disque->journal, 1 ), true ), 'le rebut ne doit pas être effacé après un échec' );
+} );
+
+test( 'si la fautive ne peut pas être écartée, rien d’autre n’est tenté', function () use ( $cible, $sauve ): void {
+	// Écarter la fautive est la première opération. Enchaîner malgré son échec
+	// déplacerait la sauvegarde vers une cible occupée : selon le système de
+	// fichiers, on perdrait l'une ou l'autre.
+	$disque        = new Faux_Filesystem( [ $cible, $sauve ] );
+	$disque->refus = [ $cible ];
+
+	assert_that( ! restaurer( $disque, $sauve ), 'un retour en arrière manqué doit se dire faux' );
+	assert_same( [ $sauve, $cible ], $disque->etat(), 'les deux versions doivent rester où elles sont :' );
+	assert_same( 2, count( $disque->journal ), 'une seule tentative après le nettoyage du rebut :' );
+} );
+
+test( 'un rebut laissé par un échec précédent ne bloque pas le retour suivant', function () use ( $cible, $rebut, $sauve ): void {
+	// `move()` avec écrasement ne suffit pas partout : sur un dossier non vide,
+	// `rename()` échoue. Le rebut est donc effacé d'abord — sans quoi le second
+	// retour en arrière serait celui qui laisse le site sans composant.
+	$disque = new Faux_Filesystem( [ $cible, $sauve, $rebut ] );
+
+	assert_that( restaurer( $disque, $sauve ), 'le retour en arrière doit réussir malgré un rebut résiduel' );
+	assert_same( [ $cible ], $disque->etat(), 'après remise en place :' );
+	assert_same( "delete {$rebut}", $disque->journal[0], 'le rebut doit être effacé en premier :' );
 } );
 
 /* ------------------------------------------------------------------ */

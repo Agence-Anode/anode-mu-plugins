@@ -33,6 +33,11 @@
       "chemin": "anode-builder",
       "source": "blueprint/mu-plugins/anode-builder"
     },
+    "anode-animations": {
+      "repo": "theoanode/anode-mu-plugins",
+      "chemin": "anode-animations",
+      "source": "blueprint/mu-plugins/anode-animations"
+    },
     "anode-bridge": {
       "repo": "theoanode/anode-bridge",
       "source": "plugin/anode-bridge"
