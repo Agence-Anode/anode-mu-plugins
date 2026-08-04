@@ -208,7 +208,21 @@ function wp_get_environment_type(): string {
  * laisserait ce chemin sans doublure, et c'est le plus sensible du fichier.
  */
 class ErreurWp {
-	public function __construct( private string $code = '', private string $message = '' ) {}
+	/*
+	 * Le troisième argument de `WP_Error` — les données, dont le **statut HTTP** —
+	 * n'existait pas dans ce double. PHP tolère un argument surnuméraire sur une
+	 * fonction utilisateur : le statut était donc passé par le code et jeté ici, en
+	 * silence, depuis que ce double existe. Aucun test ne pouvait le voir.
+	 *
+	 * Il compte : un `401` et un `403` ne se comportent pas de la même façon derrière
+	 * un `AuthType Basic` — le premier fait ouvrir au navigateur une boîte de
+	 * dialogue que rien ne peut satisfaire.
+	 */
+	public function __construct(
+		private string $code = '',
+		private string $message = '',
+		private array $donnees = []
+	) {}
 
 	public function get_error_code(): string {
 		return $this->code;
@@ -216,6 +230,10 @@ class ErreurWp {
 
 	public function get_error_message(): string {
 		return $this->message;
+	}
+
+	public function get_error_data(): array {
+		return $this->donnees;
 	}
 }
 
@@ -730,6 +748,15 @@ test( 'hors production, une route de contenu est refusée à l’anonyme', funct
 
 	assertTrue( is_wp_error( $refus ), 'le contenu est servi à un visiteur anonyme' );
 	assertSame( 'anode_rest_prive', $refus->get_error_code() );
+
+	/*
+	 * Le statut fait partie du contrat, et il n'est pas interchangeable : un `401`
+	 * dans un périmètre Apache en `AuthType Basic` reçoit le `WWW-Authenticate` du
+	 * serveur, et le navigateur ouvre une boîte de dialogue qu'aucun identifiant ne
+	 * peut satisfaire — le refus vient de WordPress. Mesuré sur trois des quatre
+	 * préproductions du parc, le 04/08/2026.
+	 */
+	assertSame( 403, $refus->get_error_data()['status'] ?? null );
 } );
 
 test( 'le moteur de formulaire reste ouvert', function (): void {

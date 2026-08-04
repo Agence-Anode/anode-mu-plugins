@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Anode — durcissement
  * Description: Sécurité de base sans extension tierce : URL de connexion masquée, limitation des tentatives, en-têtes de sécurité, XML-RPC coupé, énumération des comptes bloquée.
- * Version:     1.5.0
+ * Version:     1.6.0
  * Author:      Anode
  *
  * Remplace SecuPress Pro et WPS Hide Login.
@@ -738,10 +738,32 @@ add_filter(
 			}
 		}
 
+		/*
+		 * **403, et pas 401 — la nuance rend le site inutilisable.**
+		 *
+		 * Une préproduction est fermée par un `htpasswd`, et le REST y est exempté
+		 * (le pilotage MCP présente un mot de passe d'application dans le même
+		 * en-tête). Mais le périmètre Apache déclare toujours `AuthType Basic` : un
+		 * `401` émis par PHP y **reçoit le `WWW-Authenticate` d'Apache par-dessus**.
+		 *
+		 * Le navigateur affiche alors sa boîte de dialogue, et **aucun identifiant ne
+		 * peut la satisfaire** : le refus vient de WordPress, qui attend un compte du
+		 * site, pas du fichier de mots de passe du serveur. L'invite revient donc
+		 * indéfiniment, sur une page par ailleurs servie en 200.
+		 *
+		 * Mesuré le 04/08/2026 : trois des quatre préproductions du parc rendaient
+		 * `401` + `WWW-Authenticate: Basic realm="Preproduction - Acces restreint"`
+		 * sur `/wp-json/`, **avec des identifiants valides**. Le symptôme trompe
+		 * complètement — on cherche un mot de passe, et c'est un code de statut.
+		 *
+		 * `403` dit ce qu'on veut dire — « refusé », non « identifiez-vous » — et
+		 * n'ouvre aucune boîte de dialogue. Le compte de service, lui, est déjà
+		 * connecté à ce stade : il ne voit ni l'un ni l'autre.
+		 */
 		return new \WP_Error(
 			'anode_rest_prive',
-			'Ce site n’est pas encore public : son API REST demande une authentification.',
-			[ 'status' => 401 ]
+			'Ce site n’est pas encore public : son API REST est réservée aux comptes du site.',
+			[ 'status' => 403 ]
 		);
 	},
 	10,
