@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Anode — formulaires
  * Description: Réception, validation et relais des formulaires vers leurs webhooks — le site n'enregistre et ne notifie rien. Versant serveur du moteur assets/js/form-engine.js, en remplacement de l'élément « formulaire » de Bricks.
- * Version:     3.2.0
+ * Version:     3.3.0
  * Author:      Anode
  *
  * Pourquoi ne pas utiliser l'élément de Bricks : un seul écran, une validation
@@ -69,6 +69,7 @@ const PUBLIC_KEYS = [
 	'optionalLabel',
 	'submitClass',
 	'submitIcon',
+	'previousIcon',
 	'redirect',
 ];
 
@@ -646,6 +647,11 @@ function champ_public( $champ ): array {
 				'helpLink',
 				'label',
 				'maxLength',
+				// Une précision grise, à la suite de l'intitulé et sur la même
+				// ligne — « (plusieurs choix possibles) ». Distincte de `help`,
+				// qui se place sous le champ : ce n'est pas le même endroit,
+				// donc pas la même clé.
+				'labelHint',
 				'maxSize',
 				'minLength',
 				// Sans elle, un `select` déclaré à choix multiple est rendu
