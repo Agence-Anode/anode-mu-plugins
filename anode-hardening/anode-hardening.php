@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Anode — durcissement
  * Description: Sécurité de base sans extension tierce : URL de connexion masquée, limitation des tentatives, en-têtes de sécurité, XML-RPC coupé, énumération des comptes bloquée.
- * Version:     1.6.0
+ * Version:     1.7.0
  * Author:      Anode
  *
  * Remplace SecuPress Pro et WPS Hide Login.
@@ -608,6 +608,65 @@ add_filter(
 		}
 
 		return $redirection;
+	}
+);
+
+/**
+ * Le sitemap ne publie pas la liste des comptes.
+ *
+ * WordPress génère `wp-sitemap-users-1.xml` d'office, et y écrit une URL par
+ * auteur : `/author/<identifiant-de-connexion>/`. L'archive elle-même est
+ * bloquée juste au-dessus — mais le sitemap, lui, **publie l'identifiant**,
+ * c'est-à-dire exactement l'information que ce blocage protège. Et il est
+ * annoncé dans `robots.txt`, donc trouvé sans même le chercher.
+ *
+ * Mesuré le 02/08/2026 sur une préproduction du parc :
+ *
+ *     curl -s https://<site>/wp-sitemap-users-1.xml
+ *     → <loc>https://<site>/author/anode-mcp/</loc>
+ *
+ * Le fournisseur entier est retiré : il n'y a aucun cas où l'on veuille référencer
+ * une archive d'auteur qu'on renvoie par ailleurs en 301.
+ */
+add_filter(
+	'wp_sitemaps_add_provider',
+	static function ( $fournisseur, string $nom ) {
+		return 'users' === $nom ? false : $fournisseur;
+	},
+	10,
+	2
+);
+
+/**
+ * … et l'URL directe répond 404, au lieu de retomber sur une page du site.
+ *
+ * Retirer le fournisseur suffit à vider l'index : plus aucune entrée « users »
+ * n'y figure. Mais l'adresse reste devinable, et elle ne mène alors nulle part
+ * de défini — WordPress ne trouve plus de sitemap à ce nom, laisse la requête
+ * suivre son cours, et sert la page qui répond au reste de la réécriture.
+ *
+ * Mesuré le 02/08/2026 : `wp-sitemap-users-1.xml` rendait la page du blog, en
+ * HTTP 200. Le nom du compte ne fuitait plus, mais un robot indexait le blog
+ * sous une seconde adresse — un doublon exact, à l'URL d'un fichier XML.
+ *
+ * On répond donc franchement. `parse_request` est le bon moment : assez tôt
+ * pour qu'aucune requête de contenu ne parte, assez tard pour lire l'URL
+ * résolue plutôt que la chaîne brute.
+ */
+add_action(
+	'parse_request',
+	static function ( $wp ): void {
+		$chemin = (string) wp_parse_url( (string) ( $_SERVER['REQUEST_URI'] ?? '' ), PHP_URL_PATH );
+
+		if ( ! preg_match( '#/wp-sitemap-users(-\d+)?\.xml$#', $chemin ) ) {
+			return;
+		}
+
+		status_header( 404 );
+		nocache_headers();
+		header( 'Content-Type: text/plain; charset=utf-8' );
+		echo "404\n";
+		exit;
 	}
 );
 
