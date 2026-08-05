@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Anode — mises à jour
  * Description: Tient à jour les mu-plugins maison depuis leurs dépôts GitHub. Vérifie chaque jour, applique les correctifs et les versions mineures, retient les majeures.
- * Version:     1.6.4
+ * Version:     1.7.2
  * Author:      Anode
  * Requires PHP: 8.1
  *
@@ -89,10 +89,10 @@ final class Updater {
 	 *
 	 * Second exemplaire de l'en-tête, tenu à la main : il avait décroché de deux
 	 * versions dans la même journée — `anode-updater/1.5.0` annoncé pendant que le
-	 * composant était en 1.6.1 — parce que rien ne confrontait les deux.
+	 * composant était en 1.7.1 — parce que rien ne confrontait les deux.
 	 * `bin/test/test-versions.mjs` le fait désormais, et échoue sur l'écart.
 	 */
-	public const VERSION = '1.6.4';
+	public const VERSION = '1.7.2';
 
 	/** Où l'on retient le résultat de la dernière vérification. */
 	public const OPTION_ETAT = 'anode_updater_etat';
