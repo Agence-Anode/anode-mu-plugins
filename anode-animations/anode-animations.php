@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Anode — animations
  * Description: Animations d'apparition au défilement, parallaxe, compteurs, machine à écrire et survols — pilotés par des attributs HTML posés dans Bricks. Aucune bibliothèque tierce, aucun CDN.
- * Version:     1.0.0
+ * Version:     1.1.0
  * Author:      Anode
  * Requires PHP: 8.1
  *
@@ -292,7 +292,28 @@ function parseOptions(el) {
     const blur      = parseFloat(attr(el, 'blur')     || DEFAULTS.blur);
     const threshold = parseFloat(attr(el, 'threshold') || DEFAULTS.threshold);
     const origin    = attr(el, 'origin') || ORIGINS[animName] || null;
-    const scroll    = attr(el, 'scroll') === 'true' || attr(el, 'scroll') === '' || attr(el, 'scroll') !== null && attr(el,'scroll') !== 'false';
+    /*
+     * `scroll` est **actif par défaut** : une animation d'apparition attend
+     * d'être visible, c'est sa raison d'être. Seul `scroll="false"` la joue
+     * aussitôt.
+     *
+     * L'écriture précédente rendait l'inverse. Sans attribut, `getAttribute`
+     * rend `null`, et la chaîne s'effondrait :
+     *
+     *     null === 'true'  → faux
+     *     null === ''      → faux
+     *     null !== null    → faux, et le && court-circuitait
+     *
+     * `scroll` valait donc `false` sur **tout** élément qui ne nommait pas le
+     * réglage, c'est-à-dire tous : `initElement` prenait la branche
+     * « animer tout de suite », aucun `IntersectionObserver` n'était posé, et la
+     * page entière jouait ses animations au chargement — y compris ce que le
+     * visiteur n'avait pas encore atteint.
+     *
+     * Le compteur et la machine à écrire, dans le même fichier, écrivaient déjà
+     * la bonne forme : `attr(el, 'scroll') !== 'false'`.
+     */
+    const scroll    = attr(el, 'scroll') !== 'false';
     const replay    = attr(el, 'replay') === 'true'  || attr(el, 'replay') === '';
     const loop      = attr(el, 'loop');   // 'true' | 'false' | nombre | null
     const fill      = attr(el, 'fill')   || DEFAULTS.fill;
@@ -368,6 +389,23 @@ function resetAnimation(el) {
    DÉCALAGE PROGRESSIF DES ENFANTS
 ============================================================ */
 
+/*
+ * Décalage progressif des enfants directs d'un conteneur.
+ *
+ * **Chaque enfant touché doit être initialisé ici, et cet appel n'est pas
+ * facultatif.** `init()` parcourt une NodeList rendue par `querySelectorAll` —
+ * une liste **statique**, construite avant que le premier `initElement` ne
+ * s'exécute. Les enfants qui reçoivent leur `animate` ci-dessous n'y sont donc
+ * pas : personne ne les observait, personne ne les animait, et la règle
+ * `[animate] { opacity: 0 }` posée par le même attribut les masquait pour de
+ * bon.
+ *
+ * Mesuré le 05/08/2026 sur une préproduction du parc : les grilles de cartes
+ * portaient le motif documenté — `animate="fade-up"` + `stagger="90ms"` — et
+ * leurs cartes ne réapparaissaient jamais. Le conteneur, lui, s'animait
+ * normalement ; c'est ce qui rend la panne difficile à lire, puisque la section
+ * entre bien et reste vide.
+ */
 function applyStagger(container, opts) {
     const { stagger } = opts;
     if (!stagger) return;
@@ -377,11 +415,23 @@ function applyStagger(container, opts) {
     const children = Array.from(container.children);
     children.forEach((child, i) => {
         const childOpts = parseOptions(child);
-        if (!child.hasAttribute(ANIMATTR)) {
+        const herite = !child.hasAttribute(ANIMATTR);
+
+        if (herite) {
             child.setAttribute(ANIMATTR, opts.animName);
         }
+
         const extraDelay = stagger * i;
         child.setAttribute('delay', `${(childOpts.delay || opts.delay) + extraDelay}ms`);
+
+        /*
+         * Un enfant déjà initialisé l'a été avec son ancien `delay` : il faut
+         * le reprendre pour que le décalage compte. `initElement` est idempotent
+         * du point de vue de l'observer — `getObserver` met ses instances en
+         * cache et `observe()` sur une cible déjà observée ne fait rien.
+         */
+        child.dataset.basInit = 'true';
+        initElement(child);
     });
 }
 
