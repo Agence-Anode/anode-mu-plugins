@@ -52,6 +52,7 @@ define( 'ABSPATH', __DIR__ );
  * déclare déjà son namespace sans accolades : d'où le fichier voisin.
  */
 require_once __DIR__ . '/doublure-bricks.php';
+require_once __DIR__ . '/doublure-bricks-database.php';
 
 /* --- Doublures WordPress --------------------------------------------- */
 
@@ -225,9 +226,14 @@ test( 'un fichier absent retombe sur un repli, jamais sur false', function (): v
 
 echo "\nFonctions actives\n";
 
-test( 'les trois fonctions sont actives par défaut', function (): void {
+test( 'les quatre fonctions sont actives par défaut', function (): void {
 	assert_same(
-		[ 'classe_active' => true, 'curseur_largeur' => true, 'composant_dblclic' => true ],
+		[
+			'classe_active'     => true,
+			'curseur_largeur'   => true,
+			'composant_dblclic' => true,
+			'classes_canevas'   => true,
+		],
 		fonctions_actives()
 	);
 } );
@@ -253,7 +259,7 @@ test( 'une clé inconnue n’active rien et n’éteint rien', function (): void
 
 	$actives = fonctions_actives();
 
-	assert_same( 3, count( $actives ), 'nombre de fonctions' );
+	assert_same( count( DEFAUTS ), count( $actives ), 'nombre de fonctions' );
 	assert_same( true, $actives['curseur_largeur'], 'la vraie fonction a été éteinte par une faute de frappe' );
 } );
 
@@ -262,18 +268,16 @@ test( 'un filtre qui ne rend pas un tableau est ignoré', function (): void {
 
 	$etat['filtres']['anode/builder/fonctions'] = 'oui';
 
-	assert_same( 3, count( fonctions_actives() ) );
+	assert_same( count( DEFAUTS ), count( fonctions_actives() ) );
 	assert_same( true, fonctions_actives()['classe_active'] );
 } );
 
-test( 'les trois fonctions éteintes, rien n’est chargé', function (): void {
+test( 'toutes les fonctions éteintes, rien n’est chargé', function (): void {
 	global $etat;
 
-	$etat['filtres']['anode/builder/fonctions'] = [
-		'classe_active'     => false,
-		'curseur_largeur'   => false,
-		'composant_dblclic' => false,
-	];
+	// Dérivé de DEFAUTS : une cinquième fonction ajoutée sans toucher ce test
+	// la laisserait allumée, et le test passerait au vert en n'éteignant rien.
+	$etat['filtres']['anode/builder/fonctions'] = array_fill_keys( array_keys( DEFAUTS ), false );
 
 	charger();
 
@@ -326,6 +330,24 @@ function code(): string {
 
 	if ( null === $code ) {
 		$code = (string) preg_replace( [ '#/\*.*?\*/#s', '#(^|\s)//[^\n]*#' ], ' ', script() );
+	}
+
+	return $code;
+}
+
+/**
+ * Le source PHP du composant, commentaires retirés.
+ *
+ * `code()` lit le JavaScript : un test qui vise le PHP et l'interroge cherche
+ * dans le mauvais fichier, et passe au vert ou au rouge sans rapport avec ce
+ * qu'il énonce. Les deux sources ont donc deux lecteurs.
+ */
+function code_php(): string {
+	static $code = null;
+
+	if ( null === $code ) {
+		$source = (string) file_get_contents( __DIR__ . '/../anode-builder.php' ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents
+		$code   = (string) preg_replace( [ '#/\*.*?\*/#s', '#(^|\s)//[^\n]*#' ], ' ', $source );
 	}
 
 	return $code;
@@ -779,6 +801,241 @@ test( 'une fonction en échec n’emporte pas les autres', function (): void {
 	// disparaît, les deux autres fonctions doivent continuer.
 	assert_true( str_contains( script(), 'try {' ), 'aucune protection autour du démarrage' );
 	assert_true( str_contains( script(), 'console.warn' ), 'un échec ne laisse aucune trace' );
+} );
+
+/* --- Le CSS des classes globales dans le canevas ---------------------- */
+
+echo "\nClasses globales du canevas\n";
+
+/*
+ * Ces tests-ci ne lisent pas du texte : ils **exécutent** l'indexation. C'est
+ * possible parce qu'elle est pure — pas de WordPress, pas de Bricks. Ce qui
+ * demande Bricks, c'est la génération du CSS elle-même, et on ne la double pas :
+ * la réécrire ici reviendrait à tester notre idée du générateur plutôt que le
+ * générateur. Cette part est mesurée sur un site servi, par
+ * `bin/check-canevas.mjs`.
+ */
+
+test( 'une classe est indexée sous le type d’élément qui la porte', function (): void {
+	$carte = [];
+
+	indexer_elements(
+		[
+			[ 'name' => 'section', 'settings' => [ '_cssGlobalClasses' => [ 'abc' ] ] ],
+			[ 'name' => 'heading', 'settings' => [ '_cssGlobalClasses' => [ 'abc', 'def' ] ] ],
+		],
+		$carte
+	);
+
+	// Bricks émet `.classe.brxe-<type>` : le type manquant est une règle manquante.
+	assert_same( [ 'section', 'heading' ], $carte['abc'] );
+	assert_same( [ 'heading' ], $carte['def'] );
+} );
+
+test( 'un identifiant numérique désigne bien sa classe', function (): void {
+	$carte = [];
+
+	indexer_elements( [ [ 'name' => 'block', 'settings' => [ '_cssGlobalClasses' => [ 358029 ] ] ] ], $carte );
+
+	/*
+	 * On ne peut pas exiger une clé de type chaîne, et c'est PHP qui l'impose :
+	 * une clé numérique canonique est reconvertie en entier à l'écriture, quel
+	 * que soit le `(string)` posé avant. « 085233 » — un identifiant réel du parc
+	 * — y échappe, parce que sa forme n'est pas canonique.
+	 *
+	 * Ce qui compte est donc que Bricks la retrouve : `generate_global_classes()`
+	 * cherche par `array_search()` **non strict**, où `358029 == '358029'` est
+	 * vrai. Ce test épingle cette équivalence plutôt que le type, sans quoi il
+	 * exigerait l'impossible et pousserait à contourner ce qui fonctionne.
+	 */
+	assert_same( [ '358029' ], array_map( 'strval', array_keys( $carte ) ) );
+	assert_true(
+		false !== array_search( array_key_first( $carte ), [ '358029' ] ), // phpcs:ignore WordPress.PHP.StrictInArray.MissingTrueStrict
+		'Bricks ne retrouverait pas la classe'
+	);
+} );
+
+test( 'un même type n’est pas compté deux fois', function (): void {
+	$carte = [];
+
+	indexer_elements(
+		[
+			[ 'name' => 'block', 'settings' => [ '_cssGlobalClasses' => [ 'abc' ] ] ],
+			[ 'name' => 'block', 'settings' => [ '_cssGlobalClasses' => [ 'abc' ] ] ],
+		],
+		$carte
+	);
+
+	assert_same( [ 'block' ], $carte['abc'] );
+} );
+
+test( 'un élément sans réglages ne casse pas l’indexation', function (): void {
+	$carte = [];
+
+	// PHP encode un tableau vide en `[]`, jamais en `{}` : `settings` arrive donc
+	// comme une liste sur toute instance de composant.
+	indexer_elements(
+		[
+			[ 'name' => 'block', 'settings' => [] ],
+			[ 'name' => 'block' ],
+			[ 'name' => '', 'settings' => [ '_cssGlobalClasses' => [ 'abc' ] ] ],
+			'pas un élément',
+		],
+		$carte
+	);
+
+	assert_same( [], $carte, 'un élément sans type ne doit rien indexer' );
+} );
+
+test( 'une variante expose les classes de toutes ses options', function (): void {
+	$propriete = [
+		'type'    => 'class',
+		'default' => [ 'ghost' ],
+		'options' => [
+			[ 'id' => 'ghost',   'value' => [ '111', '222' ] ],
+			[ 'id' => 'primary', 'value' => [ '111', '333' ] ],
+		],
+	];
+
+	// Pas seulement l'option par défaut : changer de variante dans le builder ne
+	// doit pas laisser l'élément sans style jusqu'au rechargement.
+	assert_same( [ '111', '222', '333' ], ids_de_propriete( $propriete ) );
+} );
+
+test( 'sans options, le défaut d’une propriété désigne des classes', function (): void {
+	assert_same( [ '444' ], ids_de_propriete( [ 'type' => 'class', 'default' => [ '444' ] ] ) );
+} );
+
+test( 'une propriété de classe est reliée au type de l’élément connecté', function (): void {
+	$carte = [];
+
+	indexer_proprietes_classe(
+		[
+			'elements'   => [
+				[ 'id' => 'e1', 'name' => 'button' ],
+				[ 'id' => 'e2', 'name' => 'heading' ],
+			],
+			'properties' => [
+				[
+					'type'        => 'class',
+					'default'     => [ 'ghost' ],
+					'options'     => [ [ 'id' => 'ghost', 'value' => [ '111' ] ] ],
+					'connections' => [ 'e1' => [ '_cssGlobalClasses' ] ],
+				],
+			],
+		],
+		$carte
+	);
+
+	assert_same( [ 'button' ], $carte['111'] ?? [], 'la classe doit suivre l’élément relié' );
+} );
+
+test( 'une propriété qui n’est pas de type class est ignorée', function (): void {
+	$carte = [];
+
+	indexer_proprietes_classe(
+		[
+			'elements'   => [ [ 'id' => 'e1', 'name' => 'button' ] ],
+			'properties' => [
+				[ 'type' => 'text', 'default' => [ '111' ], 'connections' => [ 'e1' => [ 'text' ] ] ],
+			],
+		],
+		$carte
+	);
+
+	assert_same( [], $carte );
+} );
+
+/*
+ * Le poids des règles — la limite du 03/08/2026, et sa levée.
+ *
+ * Ces quatre tests-ci tiennent la **décision**, pas la génération : quelle
+ * classe a le droit d'être servie plus lourd. C'est là que le défaut se joue, et
+ * c'est mesurable hors ligne parce que la décision est pure.
+ *
+ * Ce qu'ils ne peuvent pas dire : que Bricks émet bien le sélecteur doublé. Ça
+ * se mesure dans un navigateur, des deux côtés — `bin/check-canevas.mjs`.
+ */
+
+test( 'une classe qu’aucun élément ne porte est servie plus lourd', function (): void {
+	// `c-entete--centre` n'existe que dans l'option d'une variante : le
+	// JavaScript du canevas n'émet rien pour elle, et sa classe de base la
+	// recouvrait. Mesuré : `row flex-end` dans le canevas, `column center` sur le
+	// front.
+	assert_same(
+		[ 'modif' => [ 'block' ] ],
+		classes_hors_index( [ 'base' => [ 'block' ] ], [ 'modif' => [ 'block' ] ] )
+	);
+} );
+
+test( 'une classe portée par un élément n’est jamais alourdie', function (): void {
+	/*
+	 * C'est le test d'absence qui protège le §5. Bricks émet une balise pour
+	 * toute classe présente dans le `_cssGlobalClasses` d'un élément de composant
+	 * — 79 sur 79, mesuré le 03/08/2026 sur un site du parc. L'alourdir ferait gagner
+	 * notre valeur figée contre celle du panneau : une modification faite dans le
+	 * builder n'apparaîtrait plus, et l'on aurait créé le défaut inverse.
+	 */
+	assert_same(
+		[],
+		classes_hors_index(
+			[ 'partagee' => [ 'button' ] ],
+			[ 'partagee' => [ 'button' ] ]
+		),
+		'une classe portée par un élément a déjà sa balise'
+	);
+} );
+
+test( 'seul le nom des classes visées est doublé', function (): void {
+	\Bricks\Database::$global_data['globalClasses'] = [
+		[ 'id' => '111', 'name' => 'c-entete' ],
+		[ 'id' => '222', 'name' => 'c-entete--centre' ],
+		[ 'id' => '333', 'name' => '' ],
+	];
+
+	$avant = doubler_les_noms( [ '222', '333' ] );
+
+	// Bricks construit son sélecteur depuis le nom : `.c-x.c-x` sort en 0-3-0, et
+	// la substitution suit les sous-sélecteurs sans qu'on les connaisse.
+	assert_same(
+		[ 'c-entete', 'c-entete--centre.c-entete--centre', '' ],
+		array_column( \Bricks\Database::$global_data['globalClasses'], 'name' )
+	);
+
+	// La valeur rendue est ce qui permet de restaurer : sans elle, la feuille du
+	// front hériterait de noms doublés pour le reste de la requête.
+	assert_same( 'c-entete--centre', $avant[1]['name'], 'l’état d’avant n’est pas rendu' );
+
+	\Bricks\Database::$global_data['globalClasses'] = $avant;
+} );
+
+test( 'les noms doublés sont rendus même en cas d’échec', function (): void {
+	// Même raison que le `finally` des propriétés statiques : une génération qui
+	// lève laisserait `.c-x.c-x` dans les classes globales, et le front servirait
+	// ce sélecteur à chaque visiteur.
+	assert_true(
+		str_contains( code_php(), '\Bricks\Database::$global_data[\'globalClasses\'] = $classes;' ),
+		'les noms doublés ne sont pas restaurés dans le finally'
+	);
+} );
+
+test( 'la feuille n’est servie que dans le canevas', function (): void {
+	// Un test d'absence : émise sur le front, elle doublerait le CSS de Bricks
+	// sur chaque page vue par un visiteur. La garde est le seul rempart.
+	assert_true(
+		str_contains( code_php(), 'bricks_is_builder_iframe' ),
+		'aucune garde de canevas : la feuille partirait sur le front'
+	);
+} );
+
+test( 'les propriétés statiques de Bricks sont rendues même en cas d’échec', function (): void {
+	// Sans `finally`, une génération qui lève laisserait notre carte en place
+	// pour le reste de la requête — et Bricks émettrait le CSS d'une autre page.
+	assert_true( str_contains( code_php(), 'finally' ), 'aucune restauration garantie' );
+	assert_true(
+		substr_count( code_php(), '$sauvegarde[' ) >= 6,
+		'toutes les propriétés empruntées ne sont pas rendues'
+	);
 } );
 
 /* --- Compte rendu ---------------------------------------------------- */
