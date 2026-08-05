@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Anode — animations
  * Description: Animations d'apparition au défilement, parallaxe, compteurs, machine à écrire et survols — pilotés par des attributs HTML posés dans Bricks. Aucune bibliothèque tierce, aucun CDN.
- * Version:     1.1.0
+ * Version:     2.2.0
  * Author:      Anode
  * Requires PHP: 8.1
  *

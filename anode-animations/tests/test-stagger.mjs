@@ -196,6 +196,47 @@ function grilleAvecCartes(nombre, attributsGrille) {
 
 process.stdout.write('\n\x1b[1mDécalage progressif — le motif documenté\x1b[0m\n\n');
 
+/*
+ * Le défaut le plus coûteux de ce moteur, et le plus difficile à nommer : les
+ * animations **se jouent au chargement** au lieu d'attendre le défilement.
+ *
+ * On ne le décrit pas comme un défaut, on le décrit comme une absence : « les
+ * animations ne marchent pas, je ne les vois jamais ». Et c'est exact — tout est
+ * déjà terminé quand on arrive au bloc, et le rechargement rejoue le tout hors de
+ * l'écran.
+ *
+ * La cause tient dans une chaîne de conditions qui s'effondre sur `null` :
+ *
+ *     attr(el, 'scroll') === 'true' || … || attr(el, 'scroll') !== null && …
+ *
+ * Sans attribut, `getAttribute` rend `null`, aucune branche ne passe, et `scroll`
+ * vaut `false` sur **tout** élément qui ne nomme pas le réglage — c'est-à-dire
+ * tous. `initElement` prend alors la branche « animer tout de suite » et aucun
+ * `IntersectionObserver` n'est posé.
+ *
+ * La question qui départage tient en un mot : **l'élément est-il observé ?**
+ * Aucune lecture de texte ne peut y répondre, et c'est pour cela que ce cas vit
+ * ici et non dans le banc PHP.
+ */
+test('sans attribut « scroll », l’élément est observé — jamais animé aussitôt', () => {
+  const { corps, grille } = grilleAvecCartes(0, { animate: 'fade-up' });
+  const { observes } = monter(corps);
+
+  affirmer(observes.includes(grille),
+    'l’élément n’est pas observé : son animation est jouée au chargement, hors de l’écran. '
+    + 'À l’usage, on ne voit jamais une animation se jouer — et l’on croit qu’elles ne marchent pas.');
+});
+
+test('« scroll="false" » est la seule façon de jouer aussitôt', () => {
+  const { corps, grille } = grilleAvecCartes(0, { animate: 'fade-up' });
+  grille.setAttribute('scroll', 'false');
+
+  const { observes } = monter(corps);
+
+  affirmer(!observes.includes(grille),
+    'l’élément est observé alors qu’il demande explicitement à ne pas l’être');
+});
+
 test('une grille à stagger fait observer chacune de ses cartes', () => {
   const { corps, cartes } = grilleAvecCartes(3, { animate: 'fade-up', stagger: '90ms' });
   const { observes } = monter(corps);
