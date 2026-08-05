@@ -2642,8 +2642,8 @@ function get_the_date( string $format = '', $post = null ): string {
 		function (): void {
 			/*
 			 * Le défaut est mesuré, pas imaginé. `contact.json` et
-			 * `reservation.json` de Niort Tech — un site client en préproduction —
-			 * portaient encore « notify: contact@niort-tech.fr », restée là quand
+			 * `reservation.json` d’un site client en préproduction
+			 * portaient encore « notify: contact@exemple.fr », restée là quand
 			 * l'envoi de courriel est parti avec le stockage des demandes.
 			 *
 			 * Les deux fichiers annonçaient donc un destinataire que plus une ligne
@@ -2656,7 +2656,7 @@ function get_the_date( string $format = '', $post = null ): string {
 				clefs_inconnues(
 					[
 						'label'   => 'Nous contacter',
-						'notify'  => 'contact@niort-tech.fr',
+						'notify'  => 'contact@exemple.fr',
 						'webhook' => '',
 					]
 				),
