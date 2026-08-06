@@ -972,7 +972,7 @@ test( 'une classe portée par un élément n’est jamais alourdie', function ()
 	/*
 	 * C'est le test d'absence qui protège le §5. Bricks émet une balise pour
 	 * toute classe présente dans le `_cssGlobalClasses` d'un élément de composant
-	 * — 79 sur 79, mesuré le 03/08/2026 sur un site du parc. L'alourdir ferait gagner
+	 * — 79 sur 79, mesuré le 03/08/2026 sur mon-site. L'alourdir ferait gagner
 	 * notre valeur figée contre celle du panneau : une modification faite dans le
 	 * builder n'apparaîtrait plus, et l'on aurait créé le défaut inverse.
 	 */

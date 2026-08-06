@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Anode — confort du builder
  * Description: Quatre manques de Bricks Builder, comblés sans extension tierce : la classe active reste sélectionnée, un curseur balaie les largeurs au pixel, un double-clic dans la structure ouvre un composant, et le canevas reçoit le CSS des classes globales.
- * Version:     2.2.0
+ * Version:     2.2.1
  * Author:      Anode
  * Requires PHP: 8.1
  *
@@ -163,7 +163,7 @@ function fonctions_actives(): array {
  * que Bricks emploie lui-même pour l'éditeur de blocs
  * (`generate_gutenberg_global_classes_css()`, `includes/integrations/block-editor.php`).
  *
- * ## Et le poids des règles, mesuré plutôt que supposé (2.2.0)
+ * ## Et le poids des règles, mesuré plutôt que supposé (2.2.1)
  *
  * Le JavaScript de Bricks réémet ses classes **après** notre feuille, dans une
  * balise par classe. À spécificité égale il gagne, ce qui est voulu. Le prix,
