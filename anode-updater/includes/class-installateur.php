@@ -60,7 +60,7 @@ final class Installateur {
 			);
 		}
 
-		$fichier = Source::telecharger( (string) $archive['archive']['url'] );
+		$fichier = Source::telecharger( $archive['archive'] );
 
 		if ( is_wp_error( $fichier ) ) {
 			return $fichier;
@@ -134,7 +134,7 @@ final class Installateur {
 			return true;
 		}
 
-		$publiee = Source::telecharger( (string) $empreinte['url'] );
+		$publiee = Source::telecharger( $empreinte );
 
 		if ( is_wp_error( $publiee ) ) {
 			return new \WP_Error(
@@ -184,7 +184,7 @@ final class Installateur {
 			return true;
 		}
 
-		$publiee = Source::telecharger( (string) $signature['url'] );
+		$publiee = Source::telecharger( $signature );
 
 		if ( is_wp_error( $publiee ) ) {
 			return new \WP_Error(

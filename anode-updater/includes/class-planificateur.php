@@ -197,11 +197,34 @@ final class Planificateur {
 		$releases  = Source::releases( (string) $composant['repo'] );
 
 		if ( is_wp_error( $releases ) ) {
-			// Un dépôt qui n'existe pas encore n'est pas une panne : c'est un
-			// composant pas encore publié. On le note sans alerter l'admin d'un
-			// site en production, qui n'y peut rien.
+			$code = (string) $releases->get_error_code();
+
+			/*
+			 * Trois motifs, trois états — parce qu'ils appellent trois conduites.
+			 *
+			 * Un dépôt qui n'existe pas encore n'est pas une panne : c'est un
+			 * composant pas encore publié. On le note sans alerter l'admin d'un site
+			 * en production, qui n'y peut rien.
+			 *
+			 * Un quota d'API épuisé n'en est pas une non plus, et c'est la panne la
+			 * plus probable depuis que les dépôts sont publics : sans jeton, GitHub
+			 * accorde soixante appels par heure et **par IP**, et les sites d'un même
+			 * hébergement la partagent. La passe suivante repartira seule. Le ranger
+			 * avec les erreurs enverrait chercher un dépôt cassé là où il n'y a qu'une
+			 * attente — et `code` seul ne suffisait pas : rien ne l'écrivait dans
+			 * l'état, donc la sonde qui l'y cherchait rendait toujours zéro.
+			 */
+			$etat = 'erreur';
+
+			if ( 'anode_updater_depot' === $code ) {
+				$etat = 'depot-absent';
+			} elseif ( 'anode_updater_quota' === $code ) {
+				$etat = 'quota';
+			}
+
 			return [
-				'etat'      => 'anode_updater_depot' === $releases->get_error_code() ? 'depot-absent' : 'erreur',
+				'etat'      => $etat,
+				'code'      => $code,
 				'installee' => $installee,
 				'message'   => $releases->get_error_message(),
 			];

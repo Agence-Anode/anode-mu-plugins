@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Anode — mises à jour
  * Description: Tient à jour les mu-plugins maison depuis leurs dépôts GitHub. Vérifie chaque jour, applique les correctifs et les versions mineures, retient les majeures.
- * Version:     1.7.2
+ * Version:     1.9.1
  * Author:      Anode
  * Requires PHP: 8.1
  *
@@ -92,7 +92,7 @@ final class Updater {
 	 * composant était en 1.7.1 — parce que rien ne confrontait les deux.
 	 * `bin/test/test-versions.mjs` le fait désormais, et échoue sur l'écart.
 	 */
-	public const VERSION = '1.7.2';
+	public const VERSION = '1.9.1';
 
 	/** Où l'on retient le résultat de la dernière vérification. */
 	public const OPTION_ETAT = 'anode_updater_etat';
@@ -106,6 +106,17 @@ final class Updater {
 	 * n'avait alors aucune trace à interroger.
 	 */
 	public const OPTION_JOURNAL = 'anode_updater_journal';
+
+	/**
+	 * Le palier automatique, quand il est réglé depuis l'écran.
+	 *
+	 * Il existe parce qu'un site se vend : le client garde ses mises à jour, et
+	 * doit pouvoir en couper l'automatique sans éditer `wp-config.php`. La
+	 * constante reste — elle verrouille un site depuis le fichier — mais elle
+	 * passe seconde, sinon un réglage posé à la main serait défait au prochain
+	 * déploiement.
+	 */
+	public const OPTION_AUTO = 'anode_updater_auto';
 
 	/** Entrées gardées au journal — au-delà, les plus anciennes tombent. */
 	public const JOURNAL_MAX = 50;
@@ -403,7 +414,29 @@ final class Updater {
 	 * défini — auquel cas les mineures passent et les majeures attendent.
 	 */
 	public static function auto_autorise( string $palier ): bool {
-		$reglage = defined( 'ANODE_UPDATER_AUTO' ) ? constant( 'ANODE_UPDATER_AUTO' ) : 'mineure';
+		/*
+		 * L'option d'abord, la constante ensuite, le défaut en dernier.
+		 *
+		 * L'écran des mises à jour est l'endroit où le client décide ; la
+		 * constante sert à verrouiller un site depuis `wp-config.php`. Prendre la
+		 * constante en premier rendrait l'interrupteur muet sur tout site qui la
+		 * porte — c'est-à-dire sur tous les nôtres.
+		 */
+		/*
+		 * `function_exists` : ce module est éprouvé **hors** WordPress, par une
+		 * suite qui n'en charge pas le noyau. Un appel nu à `get_site_option` y
+		 * lève une fatale, et deux cas du banc sont tombés en l'ajoutant — c'est
+		 * précisément ce qu'un banc hors ligne doit attraper.
+		 */
+		$option = function_exists( 'get_site_option' ) ? get_site_option( self::OPTION_AUTO, null ) : null;
+
+		if ( null !== $option ) {
+			$reglage = 'jamais' === $option ? false : (string) $option;
+		} elseif ( defined( 'ANODE_UPDATER_AUTO' ) ) {
+			$reglage = constant( 'ANODE_UPDATER_AUTO' );
+		} else {
+			$reglage = 'mineure';
+		}
 		$plafond = self::plafond_auto( $reglage );
 
 		if ( null === $plafond ) {
@@ -499,10 +532,15 @@ final class Updater {
 	 * entière du dépôt sous un dossier horodaté, donc rien qu'on puisse installer
 	 * sans deviner.
 	 *
-	 * Seule l'URL d'API (`url`) est retenue : `browser_download_url` passe par
-	 * github.com, qui ignore le jeton et répond 404 sur un dépôt privé.
+	 * **Les deux URL sont conservées**, et `Source::telecharger()` choisit.
+	 * `browser_download_url` passe par github.com : il ignore le jeton et répond
+	 * 404 sur un dépôt privé — mais sur un dépôt **public** il fait le même travail
+	 * sans consommer le quota d'API, qui est de soixante appels par heure et
+	 * **par IP** sans jeton. Une installation de onze composants demande trois
+	 * appels chacun ; par l'API, elle en dépenserait plus de la moitié, et les
+	 * sites d'un même hébergement partagent cette IP.
 	 *
-	 * @param array<int, array{name?: string, url?: string}> $assets
+	 * @param array<int, array{name?: string, url?: string, browser_download_url?: string}> $assets
 	 */
 	public static function archive( array $assets, string $nom, string $version ): ?array {
 		$attendu   = sprintf( '%s-%s.zip', $nom, $version );
@@ -585,5 +623,7 @@ require_once __DIR__ . '/includes/class-sonde.php';
 require_once __DIR__ . '/includes/class-source.php';
 require_once __DIR__ . '/includes/class-installateur.php';
 require_once __DIR__ . '/includes/class-planificateur.php';
+require_once __DIR__ . '/includes/class-ecran.php';
 
 Planificateur::demarrer();
+Ecran::demarrer();

@@ -96,10 +96,34 @@ final class Source {
 			return new \WP_Error(
 				'anode_updater_depot',
 				sprintf(
-					'Dépôt %s introuvable. S’il est privé, définissez ANODE_GITHUB_TOKEN dans wp-config.php.',
+					'Dépôt %s introuvable. Les dépôts de releases sont publics : un 404 dit donc '
+						. 'qu’il a été renommé, rendu privé, ou que la liste des composants le nomme mal.',
 					$repo
 				)
 			);
+		}
+
+		/*
+		 * 403 et 429 sont la panne réaliste depuis que le jeton est optionnel : sans
+		 * lui, GitHub accorde soixante appels par heure et **par IP**, et les sites
+		 * d'un même hébergement partagent cette IP. Le message doit le nommer, sinon
+		 * on cherche un dépôt cassé là où il n'y a qu'une attente à observer.
+		 */
+		if ( in_array( $code, [ 403, 429 ], true ) ) {
+			$restant = wp_remote_retrieve_header( $reponse, 'x-ratelimit-remaining' );
+
+			if ( '0' === (string) $restant ) {
+				$reprise = (int) wp_remote_retrieve_header( $reponse, 'x-ratelimit-reset' );
+
+				return new \WP_Error(
+					'anode_updater_quota',
+					sprintf(
+						'Quota d’API GitHub épuisé pour cette IP%s. Rien à corriger : la prochaine '
+							. 'passe repartira. Un jeton en constante relève le quota de 60 à 5000 appels par heure.',
+						$reprise ? sprintf( ' jusqu’à %s', gmdate( 'H:i', $reprise ) . ' UTC' ) : ''
+					)
+				);
+			}
 		}
 
 		if ( 200 !== $code ) {
@@ -128,19 +152,80 @@ final class Source {
 	/**
 	 * Télécharge un fichier d'une release et renvoie son chemin local.
 	 *
-	 * L'URL attendue est celle de **l'API** (`…/releases/assets/<id>`), pas le
-	 * `browser_download_url` : celui-ci passe par github.com, qui ignore le jeton
-	 * d'API et répond 404 sur un dépôt privé. Constaté en installant pour de
-	 * vrai — la lecture des releases fonctionnait, le téléchargement non.
+	 * ## Deux URL, et l'ordre compte
 	 *
-	 * En deux temps, et c'est nécessaire : l'API répond par une redirection vers
-	 * un stockage d'objets qui **refuse** une requête portant déjà un en-tête
-	 * d'authentification. On récupère donc la redirection, puis on la suit sans
-	 * en-tête.
+	 * Un asset de release en a deux : celle de l'**API**
+	 * (`…/releases/assets/<id>`) et le `browser_download_url`, qui passe par
+	 * github.com. La seconde ignore le jeton et répond 404 sur un dépôt privé —
+	 * constaté en installant pour de vrai, la lecture des releases fonctionnait et
+	 * le téléchargement non. C'est ce qui avait fait retenir l'API seule.
+	 *
+	 * Sur un dépôt **public**, elle fait le même travail **sans consommer le
+	 * quota** : soixante appels par heure et par IP sans jeton, et les sites d'un
+	 * même hébergement partagent cette IP. Une installation demande trois
+	 * téléchargements par composant ; onze composants par l'API en dépenseraient
+	 * plus de la moitié.
+	 *
+	 * On tente donc la publique d'abord, et **on retombe sur l'API si elle
+	 * refuse**. Ce repli est ce qui permet de ne rien savoir de la visibilité du
+	 * dépôt : un dépôt privé répond 404 sur la publique, et la seconde tentative
+	 * porte le jeton. Aucun réglage à tenir, aucun état à deviner.
+	 *
+	 * ## Et pourquoi l'API se télécharge en deux temps
+	 *
+	 * Elle répond par une redirection vers un stockage d'objets qui **refuse** une
+	 * requête portant déjà un en-tête d'authentification. On récupère donc la
+	 * redirection, puis on la suit sans en-tête.
+	 *
+	 * @param array{url?: string, browser_download_url?: string}|string $asset
+	 * @return string|\WP_Error
+	 */
+	public static function telecharger( $asset ) {
+		if ( is_array( $asset ) ) {
+			$publique = (string) ( $asset['browser_download_url'] ?? '' );
+			$api      = (string) ( $asset['url'] ?? '' );
+
+			if ( '' !== $publique ) {
+				$essai = self::tirer( $publique );
+
+				if ( ! is_wp_error( $essai ) ) {
+					return $essai;
+				}
+
+				/*
+				 * Le repli est tenté dès qu'une URL d'API existe — **jeton ou pas**.
+				 *
+				 * La première écriture le conditionnait au jeton, au motif qu'un dépôt
+				 * privé sans jeton échouerait des deux côtés. C'est vrai, et ça rendait
+				 * la préférence pour l'URL publique un chemin **unique** au lieu d'un
+				 * chemin préféré — précisément sur la configuration cible, un site vendu
+				 * sans jeton. Une panne de github.com, un pare-feu sortant qui n'autorise
+				 * que l'API, un asset dont l'URL publique répond 404 : plus aucun recours.
+				 *
+				 * Sur un dépôt public, l'API fonctionne sans jeton. Elle coûte du quota,
+				 * et c'est exactement le cas où un coût vaut mieux qu'un échec.
+				 */
+				if ( '' === $api ) {
+					return $essai;
+				}
+			}
+
+			if ( '' === $api ) {
+				return new \WP_Error( 'anode_updater_asset', 'Cet asset de release ne porte aucune URL exploitable.' );
+			}
+
+			return self::tirer( $api );
+		}
+
+		return self::tirer( (string) $asset );
+	}
+
+	/**
+	 * Un téléchargement, une URL.
 	 *
 	 * @return string|\WP_Error
 	 */
-	public static function telecharger( string $url ) {
+	private static function tirer( string $url ) {
 		require_once ABSPATH . 'wp-admin/includes/file.php';
 
 		$reponse = wp_remote_get(
@@ -202,12 +287,30 @@ final class Source {
 	}
 
 	/**
-	 * Arguments communs des requêtes.
+	 * Le jeton, s'il y en a un.
 	 *
-	 * Le jeton se lit dans une constante, jamais en base : une option est
-	 * exportée avec la base, sauvegardée, et lisible par toute extension. Un
-	 * jeton en lecture seule, restreint à ces dépôts, suffit.
+	 * **Il est optionnel depuis que les dépôts de releases sont publics.** Il
+	 * n'ouvre plus rien : il relève seulement le quota d'API, de soixante appels
+	 * par heure et par IP à cinq mille. Utile sur un hébergement qui porte
+	 * plusieurs sites du parc, inutile ailleurs — et surtout, **jamais nécessaire
+	 * sur un site vendu** : un jeton à nous sur le disque d'un client est un
+	 * porteur d'autorisation laissé chez un tiers, lisible par toute personne
+	 * ayant accès aux fichiers et par toute extension qu'il installera.
+	 *
+	 * Il se lit dans une constante, jamais en base : une option part avec
+	 * l'export, la sauvegarde, et se lit depuis n'importe quelle extension.
 	 */
+	private static function jeton(): ?string {
+		if ( ! defined( 'ANODE_GITHUB_TOKEN' ) || ! is_string( constant( 'ANODE_GITHUB_TOKEN' ) ) ) {
+			return null;
+		}
+
+		$jeton = trim( (string) constant( 'ANODE_GITHUB_TOKEN' ) );
+
+		return '' === $jeton ? null : $jeton;
+	}
+
+	/** Arguments communs des requêtes. */
 	private static function arguments( array $extra = [] ): array {
 		$entetes = [
 			'Accept'               => 'application/vnd.github+json',
@@ -215,8 +318,10 @@ final class Source {
 			'User-Agent'           => 'anode-updater/' . Updater::VERSION,
 		];
 
-		if ( defined( 'ANODE_GITHUB_TOKEN' ) && is_string( constant( 'ANODE_GITHUB_TOKEN' ) ) && '' !== constant( 'ANODE_GITHUB_TOKEN' ) ) {
-			$entetes['Authorization'] = 'Bearer ' . constant( 'ANODE_GITHUB_TOKEN' );
+		$jeton = self::jeton();
+
+		if ( null !== $jeton ) {
+			$entetes['Authorization'] = 'Bearer ' . $jeton;
 		}
 
 		$arguments = [
