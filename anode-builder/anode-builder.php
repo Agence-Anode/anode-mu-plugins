@@ -1,8 +1,8 @@
 <?php
 /**
  * Plugin Name: Anode — confort du builder
- * Description: Quatre manques de Bricks Builder, comblés sans extension tierce : la classe active reste sélectionnée, un curseur balaie les largeurs au pixel, un double-clic dans la structure ouvre un composant, et le canevas reçoit le CSS des classes globales.
- * Version:     2.2.1
+ * Description: Cinq manques de Bricks Builder, comblés sans extension tierce : la classe active reste sélectionnée, un curseur balaie les largeurs au pixel, un double-clic dans la structure ouvre un composant, le canevas reçoit le CSS des classes globales, et ce qu'une entrée au défilement y masquerait reste visible.
+ * Version:     2.3.0
  * Author:      Anode
  * Requires PHP: 8.1
  *
@@ -54,7 +54,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 }
 
 /**
- * Les trois fonctions, et leur nom de réglage.
+ * Les cinq fonctions, et leur nom de réglage.
  *
  * Nommées plutôt que numérotées : un site qui n'en veut qu'une le dit dans un
  * langage lisible, et le filtre ci-dessous garde son sens dans six mois.
@@ -64,12 +64,13 @@ const FONCTIONS = [
 	'curseur_largeur'    => 'Curseur de largeur du canevas, repères aux points de rupture.',
 	'composant_dblclic'  => 'Double-clic sur un composant pour l’ouvrir.',
 	'classes_canevas'    => 'Sert au canevas le CSS des classes globales que Bricks n’y émet pas.',
+	'revelation_canevas' => 'Révèle dans le canevas ce qu’une entrée au défilement y masquerait pour toujours.',
 ];
 
 /**
  * Les fonctions actives sans réglage.
  *
- * Les trois sont actives. Le tableau existe pour qu'un site puisse en couper une
+ * Les cinq sont actives. Le tableau existe pour qu'un site puisse en couper une
  * par le filtre `anode/builder/fonctions`, et pour que le défaut de chacune soit
  * lisible en un endroit plutôt que déduit d'un `array_fill_keys`.
  */
@@ -78,6 +79,61 @@ const DEFAUTS = [
 	'curseur_largeur'    => true,
 	'composant_dblclic'  => true,
 	'classes_canevas'    => true,
+	'revelation_canevas' => true,
+];
+
+/**
+ * Les classes qui décident si un contenu est visible, et de quel côté.
+ *
+ * ## Le défaut, mesuré
+ *
+ * Une entrée au défilement tient en deux temps : une classe-témoin qui **arme**
+ * l'état masqué — « le JavaScript est là, on peut cacher sans risque » —, puis une
+ * marque posée à l'intersection qui **révèle**.
+ *
+ * Dans le canevas, le premier temps a lieu et le second jamais : l'observateur
+ * regarde la fenêtre de l'iframe, que le builder ne fait pas défiler. Ce qui est
+ * sous la ligne de flottaison au chargement reste donc invisible **tant que le
+ * builder est ouvert** — ni sélectionnable, ni modifiable.
+ *
+ * Mesuré le 06/08/2026 sur une préproduction du parc : 31 éléments dans ce cas sur
+ * la seule page d'accueil — cartes de prestations, réponses de FAQ, questions —,
+ * pendant que le front était juste au pixel. Le client ouvre le builder et voit
+ * une page à trous.
+ *
+ * ## Pourquoi ces deux listes, et pas une règle CSS
+ *
+ * On ne peut pas écrire « rends visible ce qui n'est masqué que par une
+ * révélation » : le CSS ne connaît pas l'intention. On agit donc sur les classes,
+ * ce qui remet le document dans l'**état d'arrivée** que l'observateur aurait
+ * atteint — pas dans un état inventé.
+ *
+ * `retirer` s'applique à `<html>` **et** à chaque élément : un témoin vit sur la
+ * racine (`u-js`), un autre sur l'élément lui-même (`is-revealable`).
+ *
+ * Les valeurs par défaut sont **relevées** dans les feuilles et les scripts du
+ * parc, jamais devinées : `u-js` et `js` sont posées par le thème enfant,
+ * `is-revealable` par son script de révélation.
+ *
+ * ## Et `ajouter` est vide, parce que le retrait suffit — mesuré
+ *
+ * Le premier jet posait les marques d'arrivée (`is-in`, `is-visible`, `is-built`)
+ * sur chaque élément, pour rejouer ce que l'observateur aurait fait. Mesuré le
+ * 06/08/2026 sur la même page : les deux versions rendent **0 élément invisible**,
+ * mais celle qui ajoute produit deux écarts de plus — un accordéon replié y
+ * apparaît ouvert **et transformé**, parce que la marque de révélation porte aussi
+ * une translation.
+ *
+ * Le retrait, lui, ne dit qu'une chose vraie : dans le canevas, aucun mécanisme de
+ * révélation n'aboutit, donc l'état masqué ne doit pas s'armer. On garde
+ * l'intervention la plus petite qui donne le résultat, et la liste reste ouverte
+ * pour un site dont la révélation ne serait gardée par aucun témoin.
+ *
+ * Un site qui emploie d'autres noms les déclare par `anode/builder/revelation`.
+ */
+const REVELATION = [
+	'retirer' => [ 'u-js', 'js', 'is-revealable' ],
+	'ajouter' => [],
 ];
 
 /** Chemin du dossier des ressources. */
@@ -673,6 +729,119 @@ add_action(
 		$css = str_replace( '</style', '<\/style', $css );
 
 		echo "<style id=\"anode-classes-canevas\">\n" . $css . "\n</style>\n"; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped
+	},
+	999
+);
+
+/**
+ * Les listes de classes réellement employées sur ce site.
+ *
+ * @return array{retirer: array<int, string>, ajouter: array<int, string>}
+ */
+function revelation(): array {
+	/**
+	 * Permet à un site d'employer d'autres noms de classes.
+	 *
+	 * @param array{retirer: array<int, string>, ajouter: array<int, string>} $listes
+	 */
+	$listes = (array) apply_filters( 'anode/builder/revelation', REVELATION );
+
+	$propre = static fn( $v ): array => array_values( array_filter(
+		array_map( 'strval', (array) $v ),
+		/*
+		 * Le nom part dans un littéral JavaScript. On n'échappe pas : on **refuse**
+		 * ce qui n'est pas un nom de classe. Un filtre est un point d'entrée, et
+		 * assainir une valeur qu'on peut simplement valider laisse toujours un cas
+		 * qu'on n'a pas prévu.
+		 */
+		static fn( string $c ): bool => (bool) preg_match( '/^[A-Za-z][A-Za-z0-9_-]*$/', $c )
+	) );
+
+	return [
+		'retirer' => $propre( $listes['retirer'] ?? [] ),
+		'ajouter' => $propre( $listes['ajouter'] ?? [] ),
+	];
+}
+
+/**
+ * Remet le canevas dans l'état qu'une entrée au défilement aurait atteint.
+ *
+ * ## Trois détails dont chacun décide du résultat
+ *
+ * **Au pied de page, pas en tête.** Le script du thème arme l'état masqué au
+ * chargement ; agir avant lui serait défait aussitôt.
+ *
+ * **Et une seule passe ne suffit pas.** Bricks reconstruit un élément à chaque
+ * modification : le nœud neuf n'a pas nos marques, et il repart invisible — au
+ * pire moment, celui où le client vient de le modifier. Un observateur de
+ * mutations reprend donc la passe, groupée en fin de tâche pour ne pas la relancer
+ * à chaque nœud d'un même rendu.
+ *
+ * **Rien n'est écrit en style d'instance.** On ne pose aucun `style="opacity:1"` :
+ * ce serait invisible dans les panneaux, indétectable à la relecture, et ça
+ * masquerait un vrai défaut d'opacité. On ne touche qu'aux classes d'état — ce que
+ * l'observateur du site aurait fait lui-même.
+ */
+add_action(
+	'wp_footer',
+	static function (): void {
+		if ( ! function_exists( 'bricks_is_builder_iframe' ) || ! \bricks_is_builder_iframe() ) {
+			return;
+		}
+
+		if ( empty( fonctions_actives()['revelation_canevas'] ) ) {
+			return;
+		}
+
+		$listes = revelation();
+
+		if ( ! $listes['retirer'] && ! $listes['ajouter'] ) {
+			return;
+		}
+
+		$retirer = wp_json_encode( $listes['retirer'] );
+		$ajouter = wp_json_encode( $listes['ajouter'] );
+
+		?>
+<script id="anode-revelation-canevas">
+(function () {
+	var RETIRER = <?php echo $retirer; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped ?>;
+	var AJOUTER = <?php echo $ajouter; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped ?>;
+
+	function passe() {
+		RETIRER.forEach(function (c) { document.documentElement.classList.remove(c); });
+
+		var noeuds = document.body ? document.body.querySelectorAll('*') : [];
+
+		for (var i = 0; i < noeuds.length; i++) {
+			RETIRER.forEach(function (c) { noeuds[i].classList.remove(c); });
+			AJOUTER.forEach(function (c) { noeuds[i].classList.add(c); });
+		}
+	}
+
+	passe();
+
+	/* Le rendu de Bricks arrive après nous, et il recommence à chaque modification. */
+	if (!window.MutationObserver || !document.body) {
+		return;
+	}
+
+	var enAttente = false;
+
+	new MutationObserver(function () {
+		if (enAttente) {
+			return;
+		}
+
+		enAttente = true;
+
+		/* Une seule reprise par rafale de mutations : un rendu de Bricks en produit
+		 * des dizaines, et une passe par nœud rendrait le builder poussif. */
+		setTimeout(function () { enAttente = false; passe(); }, 120);
+	}).observe(document.body, { childList: true, subtree: true });
+})();
+</script>
+		<?php
 	},
 	999
 );

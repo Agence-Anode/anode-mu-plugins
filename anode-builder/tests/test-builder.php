@@ -226,16 +226,62 @@ test( 'un fichier absent retombe sur un repli, jamais sur false', function (): v
 
 echo "\nFonctions actives\n";
 
-test( 'les quatre fonctions sont actives par défaut', function (): void {
+test( 'les cinq fonctions sont actives par défaut', function (): void {
 	assert_same(
 		[
-			'classe_active'     => true,
-			'curseur_largeur'   => true,
-			'composant_dblclic' => true,
-			'classes_canevas'   => true,
+			'classe_active'      => true,
+			'curseur_largeur'    => true,
+			'composant_dblclic'  => true,
+			'classes_canevas'    => true,
+			'revelation_canevas' => true,
 		],
 		fonctions_actives()
 	);
+} );
+
+/* -------------------------------------------------------------------------
+ * La révélation du canevas
+ *
+ * Le comportement — un accordéon replié redevient visible dans le builder — se
+ * mesure dans un vrai builder (`check-canevas.mjs`). Ce qui se juge ici est la
+ * seule décision que ce fichier prend : **quels noms de classes partent dans le
+ * document**. C'est un point d'entrée par filtre, donc une frontière.
+ * ---------------------------------------------------------------------- */
+
+test( 'les témoins retirés sont ceux du parc, et rien n’est ajouté', function (): void {
+	$r = revelation();
+
+	assert_same( [ 'u-js', 'js', 'is-revealable' ], $r['retirer'] );
+
+	/*
+	 * Vide **à dessein**, et mesuré : poser les marques d'arrivée donne le même
+	 * nombre d'éléments visibles et deux écarts de plus, la marque portant aussi
+	 * une translation. La plus petite intervention qui suffit.
+	 */
+	assert_same( [], $r['ajouter'] );
+} );
+
+test( 'un nom qui n’est pas une classe est refusé, pas assaini', function (): void {
+	global $etat;
+
+	$etat['filtres']['anode/builder/revelation'] = [
+		'retirer' => [ 'u-js', '"); alert(1); //', 'is-revealable' ],
+		'ajouter' => [ 'is-in', '<script>', '' ],
+	];
+
+	$r = revelation();
+
+	/*
+	 * La valeur part dans un littéral JavaScript. On ne l'échappe pas : on écarte
+	 * ce qui n'est pas un nom de classe — un assainissement laisse toujours un cas
+	 * qu'on n'avait pas prévu, un refus n'en laisse aucun. Et les noms valables du
+	 * même filtre passent quand même : refuser tout le lot punirait une faute de
+	 * frappe par une fonction muette.
+	 */
+	assert_same( [ 'u-js', 'is-revealable' ], $r['retirer'] );
+	assert_same( [ 'is-in' ], $r['ajouter'] );
+
+	unset( $etat['filtres']['anode/builder/revelation'] );
 } );
 
 test( 'le filtre peut en éteindre une sans toucher aux autres', function (): void {
