@@ -25,6 +25,90 @@ if ( ! defined( 'ABSPATH' ) ) {
 final class Rendu {
 
 	/**
+	 * Assainit une valeur destinée à l'intérieur d'un bloc `<style>`.
+	 *
+	 * ## Pourquoi `esc_attr()` ne convient pas, et ce que ça coûtait
+	 *
+	 * `esc_attr()` échappe pour un **attribut HTML** : il transforme `'` en
+	 * `&#039;`. Une entité HTML n'est **pas décodée à l'intérieur d'un `<style>`**
+	 * — le contenu d'un élément `style` est du texte brut (« raw text » dans la
+	 * spécification HTML). Le navigateur passe donc au moteur CSS la chaîne
+	 * littérale `&#039;`, et le `;` qu'elle contient **coupe la déclaration**.
+	 *
+	 * Mesuré le 06/08/2026 sur une page d'atelier servie :
+	 *
+	 *     déclaré  --font-family-sans: 'Inter', system-ui, -apple-system, sans-serif
+	 *     émis     body{font-family:&#039;Inter&#039;, system-ui, …}
+	 *     analysé  font-family:&#039        → invalide, déclaration abandonnée
+	 *     rendu    body sans font-family    → police par défaut du navigateur = SERIF
+	 *
+	 * Tout le texte tombait en serif sauf ce qui déclare sa famille en toutes
+	 * lettres — d'où « la moitié des typos en serif », qui ne ressemble pas à un
+	 * défaut d'échappement.
+	 *
+	 * ## Ce que celle-ci garantit
+	 *
+	 * Le danger dans un `<style>` n'est pas l'apostrophe : c'est `</style>`, qui
+	 * referme le bloc et rend la suite au parseur HTML. On refuse donc `<`, `>`,
+	 * `;`, `{`, `}`, `\` et la séquence de commentaire, et l'on garde ce qu'une
+	 * valeur CSS légitime contient — lettres, chiffres, espaces, `,` `-` `.`
+	 * `#` `%` `(` `)` et les guillemets.
+	 *
+	 * `url(` et `expression(` sont écartés en plus : une valeur venue des tokens
+	 * du site n'a aucune raison d'en porter, et ce sont les deux formes par
+	 * lesquelles une valeur CSS va chercher une ressource ou exécute du code.
+	 */
+	private static function css( string $valeur ): string {
+		$valeur = preg_replace( '#/\*|\*/#', '', $valeur ) ?? '';
+		$valeur = preg_replace( '/[<>;{}\\\\]/', '', $valeur ) ?? '';
+		$valeur = preg_replace( '/(url|expression|image-set)\s*\(/i', '', $valeur ) ?? '';
+
+		return trim( $valeur );
+	}
+
+	/**
+	 * Les règles `@font-face` du site, pour un document qui ne passe pas par le thème.
+	 *
+	 * Une page d'atelier est un document **autonome** : `wp_head` n'y est jamais
+	 * appelé, donc `inc/fonts.php` du thème n'émet rien. Sans ces règles, la
+	 * famille reprise des tokens désigne une police que le navigateur n'a pas, et
+	 * l'on retombe sur `system-ui` — proche, mais ce n'est pas la marque.
+	 *
+	 * Les fichiers sont servis depuis le thème du site, en même origine : la règle
+	 * « zéro dépendance » interdit un domaine tiers, pas notre propre serveur.
+	 */
+	private static function polices(): string {
+		if ( ! function_exists( 'anode_fonts' ) ) {
+			return '';
+		}
+
+		$dossier = trailingslashit( get_stylesheet_directory() ) . 'assets/fonts/';
+		$uri     = trailingslashit( get_stylesheet_directory_uri() ) . 'assets/fonts/';
+		$regles  = '';
+
+		foreach ( anode_fonts() as $famille => $variantes ) {
+			foreach ( $variantes as $variante ) {
+				$fichier = $variante['file'] ?? '';
+
+				if ( ! $fichier || ! is_readable( $dossier . $fichier ) ) {
+					continue;
+				}
+
+				$regles .= sprintf(
+					"@font-face{font-family:'%s';src:url('%s') format('%s');font-weight:%s;font-style:%s;font-display:swap}",
+					self::css( (string) $famille ),
+					esc_url( $uri . $fichier ),
+					self::css( function_exists( 'anode_font_format' ) ? anode_font_format( $fichier ) : 'woff2' ),
+					self::css( (string) ( $variante['weight'] ?? '400' ) ),
+					self::css( (string) ( $variante['style'] ?? 'normal' ) )
+				);
+			}
+		}
+
+		return $regles;
+	}
+
+	/**
 	 * Le gabarit commun : en-tête, navigation, badge d'environnement.
 	 */
 	private static function page( string $titre, string $courant, string $corps, string $style = '' ): string {
@@ -66,7 +150,7 @@ final class Rendu {
 </html>',
 			esc_attr( get_bloginfo( 'language' ) ),
 			esc_html( $nom . ' — ' . $titre ),
-			self::style( $t ),
+			self::polices() . self::style( $t ),
 			$style,
 			esc_html( $nom ),
 			$nav,
@@ -109,15 +193,17 @@ ul.pl-liste li:hover .pl-lien-prod,.pl-lien-prod:focus-visible{opacity:1}
 @media(max-width:640px){.pl-lien-prod{opacity:1}}
 footer{text-align:center;padding:32px;font-size:12px;color:var(--pl-muted)}
 .pl-vide{color:var(--pl-muted);font-size:14px;background:var(--pl-surface);border:1px dashed var(--pl-border);border-radius:10px;padding:18px}',
-			esc_attr( $t['primary'] ),
-			esc_attr( $t['on'] ),
-			esc_attr( $t['ink'] ),
-			esc_attr( $t['muted'] ),
-			esc_attr( $t['bg'] ),
-			esc_attr( $t['surface'] ),
-			esc_attr( $t['border'] ),
-			esc_attr( $t['fontBody'] ),
-			esc_attr( $t['fontHeading'] )
+			// `self::css()` et non `esc_attr()` : on écrit dans un `<style>`, où
+			// une entité HTML n'est pas décodée. Voir le commentaire de la méthode.
+			self::css( $t['primary'] ),
+			self::css( $t['on'] ),
+			self::css( $t['ink'] ),
+			self::css( $t['muted'] ),
+			self::css( $t['bg'] ),
+			self::css( $t['surface'] ),
+			self::css( $t['border'] ),
+			self::css( $t['fontBody'] ),
+			self::css( $t['fontHeading'] )
 		);
 	}
 
@@ -306,8 +392,16 @@ ul.pl-champs li{font-size:12px;background:var(--pl-bg);border:1px solid var(--pl
 		foreach ( $groupes as $famille => $vars ) {
 			$cases = '';
 			foreach ( $vars as $nom => $valeur ) {
+				/*
+				 * Les deux, et dans cet ordre. Ici la valeur va dans un attribut
+				 * `style`, où l'entité EST décodée : `esc_attr()` est donc requis
+				 * — il empêche de sortir de l'attribut. Mais il ne dit rien du CSS
+				 * lui-même, et un `;` glissé dans un token ajouterait une seconde
+				 * déclaration. C'est le pendant exact du piège de `style()`, pris
+				 * par l'autre bout : deux contextes, deux échappements.
+				 */
 				$pastille = preg_match( '/^(#|rgb|hsl)/i', $valeur )
-					? sprintf( '<span class="pl-pastille" style="background:%s"></span>', esc_attr( $valeur ) )
+					? sprintf( '<span class="pl-pastille" style="background:%s"></span>', esc_attr( self::css( $valeur ) ) )
 					: '';
 				$cases   .= sprintf(
 					'<li>%s<code>--%s</code><span class="pl-val">%s</span></li>',

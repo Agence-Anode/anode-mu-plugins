@@ -132,6 +132,81 @@ test( 'tout ce qui vient du site est échappé', function () use ( $rendu ): voi
 	}
 } );
 
+fwrite( STDOUT, "\n\033[1mLa typographie des pages d’atelier\033[0m\n\n" );
+
+/*
+ * Ces cinq cas viennent d'un défaut mesuré le 06/08/2026 : la moitié du texte
+ * des pages d'atelier s'affichait en serif.
+ *
+ * `esc_attr()` échappait pour un attribut HTML une valeur destinée à l'intérieur
+ * d'un `<style>` — où une entité n'est jamais décodée. `'Inter'` sortait en
+ * `&#039;Inter&#039;`, le `;` de l'entité coupait la déclaration, et `body` se
+ * retrouvait sans `font-family` : police par défaut du navigateur, donc serif.
+ *
+ * Les trois premiers cas **exécutent** la fonction plutôt que de la relire :
+ * un test qui vérifierait la seule présence de `self::css` passerait au vert sur
+ * une implémentation qui ne fait rien.
+ */
+require_once __DIR__ . '/../includes/class-rendu.php';
+
+$assainir = static function ( string $valeur ): string {
+	// `setAccessible()` n'est plus nécessaire depuis PHP 8.1, et déprécié en 8.5.
+	return (string) ( new \ReflectionMethod( \Anode\Plan\Rendu::class, 'css' ) )->invoke( null, $valeur );
+};
+
+test( 'une pile de polices survit au passage dans un <style>', function () use ( $assainir ): void {
+	$sortie = $assainir( "'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif" );
+
+	affirmer( ! str_contains( $sortie, '&#' ), 'aucune entité HTML : elle n’est pas décodée dans un <style>' );
+	affirmer( ! str_contains( $sortie, '&quot;' ), 'aucune entité HTML, guillemets compris' );
+	affirmer( str_contains( $sortie, "'Inter'" ), 'la famille doit rester citable telle quelle' );
+	affirmer( str_contains( $sortie, 'sans-serif' ), 'le repli de la pile doit survivre' );
+} );
+
+test( 'une valeur ne peut pas refermer le bloc <style>', function () use ( $assainir ): void {
+	$sortie = $assainir( 'red</style><script>alert(1)</script>' );
+
+	affirmer( ! str_contains( $sortie, '<' ) && ! str_contains( $sortie, '>' ),
+		'le vrai danger dans un <style> est </style>, qui rend la suite au parseur HTML' );
+} );
+
+test( 'une valeur ne peut ni aller chercher une ressource ni commenter', function () use ( $assainir ): void {
+	affirmer( ! preg_match( '/url\s*\(/i', $assainir( "url(https://tiers.example/f.woff2)" ) ),
+		'une valeur de token n’a aucune raison d’appeler une ressource — ce serait la règle zéro dépendance par la bande' );
+	affirmer( ! str_contains( $assainir( 'a/*x*/b' ), '/*' ), 'un commentaire ouvert avalerait les déclarations suivantes' );
+	affirmer( ! str_contains( $assainir( 'red;position:fixed' ), ';' ), 'un point-virgule ajouterait une déclaration' );
+} );
+
+test( 'aucune valeur de style ne repasse par esc_attr', function () use ( $rendu ): void {
+	if ( ! preg_match( '/private static function style\([\s\S]*?\n\t\}/', $rendu, $m ) ) {
+		throw new \RuntimeException( 'style() introuvable' );
+	}
+
+	// Les commentaires sont retirés : celui qui explique le défaut nomme
+	// forcément la fonction fautive, et ferait échouer le contrôle sur lui-même.
+	$code = preg_replace( '#//.*$|/\*[\s\S]*?\*/#m', '', $m[0] ) ?? '';
+
+	affirmer( ! str_contains( $code, 'esc_attr' ),
+		'esc_attr échappe pour un attribut HTML ; dans un <style>, l’entité n’est pas décodée et casse la déclaration' );
+	affirmer( substr_count( $code, 'self::css(' ) >= 9,
+		'les neuf valeurs injectées dans la feuille doivent toutes passer par l’assainisseur CSS' );
+} );
+
+test( 'les pages portent les @font-face du site', function () use ( $rendu ): void {
+	/*
+	 * Une page d'atelier est un document autonome : `wp_head` n'y est jamais
+	 * appelé, donc `inc/fonts.php` du thème n'émet rien. Sans ces règles, la
+	 * famille reprise des tokens désigne une police absente et l'on retombe sur
+	 * `system-ui` — proche, et ce n'est pas la marque.
+	 */
+	affirmer( str_contains( $rendu, '@font-face' ), 'aucune règle @font-face : la police du site n’arrive jamais' );
+	affirmer( str_contains( $rendu, 'anode_fonts' ),
+		'les variantes se lisent dans le thème, jamais dans une seconde liste qui divergerait' );
+	affirmer( str_contains( $rendu, 'self::polices()' ), 'les règles doivent être posées dans la feuille de la page' );
+	affirmer( str_contains( $rendu, 'is_readable' ),
+		'un fichier absent ne doit pas produire une @font-face qui pointe dans le vide' );
+} );
+
 fwrite( STDOUT, "\n\033[1mLes sources lisent le site vivant\033[0m\n\n" );
 
 test( 'les formulaires sont lus dans le thème, pas dans une copie', function () use ( $sources ): void {
