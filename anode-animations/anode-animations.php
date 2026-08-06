@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Anode — animations
  * Description: Animations d'apparition au défilement, parallaxe, compteurs, machine à écrire et survols — pilotés par des attributs HTML posés dans Bricks. Aucune bibliothèque tierce, aucun CDN.
- * Version:     2.2.0
+ * Version:     2.3.0
  * Author:      Anode
  * Requires PHP: 8.1
  *
@@ -73,6 +73,40 @@ final class Animations {
 	 */
 	public const PREFIX = 'bas-';
 
+	/**
+	 * Sommes-nous dans le canevas du builder ?
+	 *
+	 * ## Pourquoi cette question décide de tout
+	 *
+	 * L'état initial masque **tout** élément portant `animate` (`opacity: 0`), et
+	 * c'est le JavaScript qui le révèle au défilement. Dans le canevas de Bricks, ce
+	 * JavaScript ne révèle rien : la page y est rendue dans un cadre qui a son propre
+	 * défilement, et l'observateur d'intersection ne se déclenche pas.
+	 *
+	 * Conséquence, et elle est brutale : **des sections entières sont invisibles dans
+	 * le builder**, alors que le site servi est parfaitement juste. Le client ouvre sa
+	 * page pour la retoucher et ne voit rien — un écran vide, sans message, sans
+	 * erreur. Aucune capture du front ne le montre, aucune sonde ne le dit : les
+	 * fichiers sont lisibles, le HTML est valide, les styles sont émis.
+	 *
+	 * Et le symptôme accuse le mauvais coupable : on cherche des styles manquants
+	 * dans les panneaux, parce qu'un élément invisible ressemble à un élément non
+	 * stylé.
+	 *
+	 * Une animation est une affaire de **front**. Un builder qui cache le contenu
+	 * qu'on vient y modifier est inutilisable, et il n'y a rien à animer dans un
+	 * canevas qu'on ne fait pas défiler pour lire.
+	 *
+	 * Le canevas se reconnaît à `?bricks=run` — c'est ainsi que Bricks charge la page
+	 * dans son cadre. On ne s'en remet pas à une fonction du thème : ce module doit
+	 * pouvoir se charger sans Bricks, et un appel à une classe absente serait une
+	 * fatale sur un mu-plugin, donc un site entier à terre.
+	 */
+	private static function dans_le_builder(): bool {
+		// phpcs:ignore WordPress.Security.NonceVerification.Recommended -- lecture d'un drapeau d'affichage.
+		return isset( $_GET['bricks'] ) && 'run' === $_GET['bricks'];
+	}
+
 	public static function boot(): void {
 		add_action( 'wp_head', [ self::class, 'inject_css' ], 99 );
 		add_action( 'wp_footer', [ self::class, 'inject_js' ], 99 );
@@ -87,7 +121,7 @@ final class Animations {
 ============================================================ */
 
 [animate]:not([animate="no-hide"]):not([animate=""]) {
-    opacity: 0;
+    opacity: <?php echo self::dans_le_builder() ? '1' : '0'; ?>;
 }
 
 /* ============================================================

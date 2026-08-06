@@ -238,6 +238,45 @@ test( 'les quarante-neuf animations sont là', function (): void {
 	assert_same( 49, count( $declarees ), 'le nombre d’animations a changé — docs/animations.md est à reprendre' );
 } );
 
+/*
+ * Le nombre annoncé en toutes lettres, que rien ne confrontait.
+ *
+ * Le banc vérifiait que chaque animation est CITÉE dans la documentation, et
+ * jamais le compte que celle-ci annonce en tête. « Cinquante » a donc vécu en
+ * face de quarante-neuf, dans trois fichiers à la fois — le CLAUDE.md, la
+ * documentation et une compétence — pendant que ce banc passait au vert.
+ *
+ * Un compte écrit en lettres se périme au premier ajout, et personne ne le voit.
+ */
+test( 'le compte annoncé par la documentation est le bon', function (): void {
+	$doc = __DIR__ . '/../../../../docs/animations.md';
+
+	if ( ! is_readable( $doc ) ) {
+		return;
+	}
+
+	$mots = [
+		'quarante-cinq' => 45, 'quarante-six' => 46, 'quarante-sept' => 47,
+		'quarante-huit' => 48, 'quarante-neuf' => 49, 'cinquante' => 50,
+		'cinquante-et-une' => 51, 'cinquante-deux' => 52,
+	];
+
+	$texte = mb_strtolower( (string) file_get_contents( $doc ) );
+	$reel  = count( animations_declarees() );
+
+	foreach ( $mots as $mot => $valeur ) {
+		if ( ! str_contains( $texte, $mot . ' animations' ) ) {
+			continue;
+		}
+
+		assert_same(
+			$reel,
+			$valeur,
+			sprintf( 'docs/animations.md annonce « %s animations » pour %d réelles', $mot, $reel )
+		);
+	}
+} );
+
 test( 'la documentation cite chaque animation', function (): void {
 	$doc = __DIR__ . '/../../../../docs/animations.md';
 
