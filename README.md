@@ -1,31 +1,26 @@
-# Composants Anode pour WordPress
+# Mises à jour — extensions WordPress
 
-> **Miroir généré — ne pas modifier ici.**
->
-> La source vit dans le dépôt `wordpress`, sous
-> `blueprint/mu-plugins/`.
-> Ce dépôt est régénéré à chaque publication par
-> `bin/release-mu-plugin.mjs`. Une modification faite ici serait écrasée.
+Dépôt de distribution. Le contenu est régénéré à la publication ;
+toute retouche faite ici est perdue au passage suivant.
 
-## À quoi il sert
+## Contenu d’une release
 
-Il porte les **releases** que `anode-updater` installe sur les sites.
-Chaque release publie :
+| Fichier | Rôle |
+|---|---|
+| `.zip` | l’extension, sans ses tests |
+| `.zip.sha256` | empreinte, contrôlée avant d’écrire sur le disque |
+| `.zip.sig` | signature, contrôlée quand la clé publique est en place |
 
-```
-<composant>-<version>.zip           le dossier du composant, tests exclus
-<composant>-<version>.zip.sha256    son empreinte, vérifiée avant installation
-<composant>-<version>.zip.sig       sa signature Ed25519, si le parc est armé
-```
+## Étiquettes
 
-Les tags sont préfixés par le composant — `anode-seo-v1.3.0` — parce que
-ce dépôt en héberge plusieurs.
+Plusieurs extensions cohabitent ici : l’étiquette porte donc le nom de
+l’extension avant son numéro.
 
-## Installation manuelle
+## Pose à la main
 
-Elle ne devrait pas être nécessaire — `anode-updater` s’en charge. Au besoin,
-décompresser l’archive dans `wp-content/mu-plugins/`.
+Le site le fait seul. En dépannage, l’archive se décompresse dans
+`wp-content/mu-plugins/`.
 
-`anode-loader.php` doit être à la racine de `mu-plugins/` : WordPress ne
-charge que les fichiers PHP qui y sont directement, et c’est lui qui charge les
-sous-dossiers. Il n’est pas suivi par l’updater.
+Le fichier de chargement reste **à la racine** de ce dossier : WordPress n’y
+lit que les fichiers PHP de premier niveau, et c’est lui qui atteint les
+sous-dossiers.
