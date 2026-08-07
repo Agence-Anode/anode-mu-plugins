@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Anode — animations
  * Description: Animations d'apparition au défilement, parallaxe, compteurs, machine à écrire et survols — pilotés par des attributs HTML posés dans Bricks. Aucune bibliothèque tierce, aucun CDN.
- * Version:     2.3.0
+ * Version:     2.4.0
  * Author:      Anode
  * Requires PHP: 8.1
  *
@@ -123,6 +123,35 @@ final class Animations {
 [animate]:not([animate="no-hide"]):not([animate=""]) {
     opacity: <?php echo self::dans_le_builder() ? '1' : '0'; ?>;
 }
+</style>
+
+<?php
+/*
+ * Sans JavaScript, l'état initial est un CONTENU PERDU.
+ *
+ * La règle ci-dessus masque tout élément portant `animate`, et c'est le script
+ * de ce composant qui le révèle. Quand il ne tourne pas — JavaScript coupé, un
+ * script qui a levé plus haut dans la page, un robot qui ne l'exécute pas — le
+ * masque reste, et le contenu n'existe plus pour personne.
+ *
+ * Mesuré le 07/08/2026 sur un site du parc : une section de témoignages de
+ * 1366 × 599 px, entièrement absente sans JavaScript, sur quatre pages. Elle
+ * portait un seul attribut : animate="fade-up".
+ *
+ * `<noscript>` est la garde exacte : son contenu n'est analysé QUE lorsque le
+ * script ne peut pas s'exécuter. Pas de classe à poser sur `<html>`, pas de
+ * script de tête à ordonner, rien qui puisse se désynchroniser — la condition
+ * est portée par le navigateur lui-même.
+ *
+ * `!important` est ici la bonne réponse et non un aveu : la règle qu'on annule
+ * est un pré-état, et un pré-état sans révélateur n'a aucun droit à survivre.
+ */
+?>
+<noscript><style id="bas-sans-js">
+[animate] { opacity: 1 !important; animation: none !important; transform: none !important; }
+</style></noscript>
+
+<style>
 
 /* ============================================================
    KEYFRAMES
