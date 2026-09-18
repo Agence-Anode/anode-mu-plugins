@@ -2635,6 +2635,55 @@ function get_the_date( string $format = '', $post = null ): string {
 
 	/* --- Réglages morts ---------------------------------------------- */
 
+	echo "\nGroupes de cases à cocher\n";
+
+	test(
+		'un groupe de cases à cocher à options accepte son tableau',
+		function (): void {
+			/*
+			 * Le moteur ne reconnaissait comme multi-choix que le « select multiple ».
+			 * Un groupe de cases — multi-choix par nature, envoyé en tableau par le
+			 * navigateur — mourait sur « valeur inattendue », un message qui accuse la
+			 * valeur quand c'est sa forme qui n'était pas prévue.
+			 */
+			$def = [
+				'label'   => 'x',
+				'webhook' => 'https://relais.exemple.test/x',
+				'fields'  => [ [
+					'name'    => 'besoins',
+					'label'   => 'De quoi avez-vous besoin ?',
+					'type'    => 'checkbox',
+					'options' => [ [ 'value' => 'SEO', 'label' => 'Référencement' ], [ 'value' => 'Design', 'label' => 'Design' ] ],
+				] ],
+			];
+
+			$r = traiter( 'multi', $def, [ 'besoins' => [ 'SEO', 'Design' ] ], '/x' );
+			$m = $r instanceof \WP_Error ? $r->get_error_message() : '';
+
+			assert_same( false, (bool) preg_match( '/inattendue/i', $m ), 'deux cases cochées doivent passer : ' . $m );
+		}
+	);
+
+	test(
+		'un groupe de cases refuse une valeur hors de ses options',
+		function (): void {
+			$def = [
+				'label'   => 'x',
+				'webhook' => 'https://relais.exemple.test/x',
+				'fields'  => [ [
+					'name'    => 'besoins',
+					'label'   => 'De quoi avez-vous besoin ?',
+					'type'    => 'checkbox',
+					'options' => [ [ 'value' => 'SEO', 'label' => 'Référencement' ] ],
+				] ],
+			];
+
+			$r = traiter( 'multi', $def, [ 'besoins' => [ 'SEO', 'forgé-par-un-robot' ] ], '/x' );
+
+			assert_same( true, $r instanceof \WP_Error, 'une valeur hors options doit être refusée' );
+		}
+	);
+
 	echo "\nRéglages morts dans une définition\n";
 
 	test(
@@ -2709,6 +2758,220 @@ function get_the_date( string $format = '', $post = null ): string {
 			}
 
 			assert_same( [], $fautives, 'réglage(s) mort(s) livré(s)' );
+		}
+	);
+
+	/* --- Le relevé de traçage : deux listes, un seul contrat ----------- */
+
+	/*
+	 * Le traçage traverse une liste blanche de chaque côté : `TRACAGE` dans
+	 * `form-engine.js` décide ce que le navigateur relève, `$connues` dans
+	 * `anode-forms.php` décide ce que le serveur accepte. Une clé ajoutée d'un
+	 * seul côté ne produit **aucune erreur** : le navigateur l'envoie, le
+	 * serveur la jette, et le scénario en aval reçoit un lead sans attribution.
+	 *
+	 * Rien ne couvrait cet accord — c'est ainsi que `wbraid`, `gbraid` et les
+	 * cinq clés de niveau annonce ont pu manquer des deux côtés sans qu'un test
+	 * ne bronche. On compare donc les deux fichiers réellement livrés, plutôt
+	 * que de recopier la liste ici : une troisième copie dériverait à son tour.
+	 */
+	$liste_du_moteur = function (): array {
+		$source = (string) file_get_contents( __DIR__ . '/../../../theme/anode-child/assets/js/form-engine.js' );
+
+		if ( ! preg_match( '/const TRACAGE = \[(.*?)\];/s', $source, $m ) ) {
+			return [];
+		}
+
+		preg_match_all( "/'([a-z_][a-z0-9_]*)'/", $m[1], $clefs );
+
+		return $clefs[1];
+	};
+
+	$liste_du_serveur = function (): array {
+		$source = (string) file_get_contents( __DIR__ . '/../anode-forms.php' );
+
+		// Le motif ne fige pas la signature : elle a déjà changé une fois, et le
+		// test avait alors échoué pour une raison qui n'était pas la sienne.
+		if ( ! preg_match( '/function tracage_recu\([^)]*\): array \{\s*\$connues = \[(.*?)\];/s', $source, $m ) ) {
+			return [];
+		}
+
+		/*
+		 * Les commentaires vivent à l'intérieur du tableau, et le français y met
+		 * des apostrophes : les retirer d'abord, sinon « l'un des deux » se lit
+		 * comme une clé.
+		 */
+		$liste = preg_replace( '#/\\*.*?\\*/|//[^\\n]*#s', '', $m[1] );
+
+		preg_match_all( "/'([a-z_][a-z0-9_]*)'/", (string) $liste, $clefs );
+
+		return $clefs[1];
+	};
+
+	test(
+		'les deux listes de traçage sont bien lues',
+		function () use ( $liste_du_moteur, $liste_du_serveur ): void {
+			// Un motif qui ne trouve rien rendrait les deux tests suivants
+			// verts sur une liste vide : la mesure doit d'abord exister.
+			assert_true( count( $liste_du_moteur() ) > 10, 'TRACAGE illisible dans form-engine.js' );
+			assert_true( count( $liste_du_serveur() ) > 10, '$connues illisible dans anode-forms.php' );
+		}
+	);
+
+	test(
+		'aucune clé relevée par le navigateur n’est jetée par le serveur',
+		function () use ( $liste_du_moteur, $liste_du_serveur ): void {
+			$jetees = array_values( array_diff( $liste_du_moteur(), $liste_du_serveur() ) );
+
+			assert_same( [], $jetees, 'clé(s) relevée(s) puis jetée(s) en silence' );
+		}
+	);
+
+	test(
+		'le serveur n’accepte rien d’autre que ce que le navigateur peut envoyer',
+		function () use ( $liste_du_moteur, $liste_du_serveur ): void {
+			/*
+			 * Trois clés ne viennent pas de l'URL — deux cookies publicitaires et
+			 * le référent — donc elles ne figurent pas dans `TRACAGE` tout en
+			 * étant légitimes. Toute autre clé acceptée par le serveur seul est
+			 * une promesse que rien ne tient.
+			 */
+			$hors_url = [ '_fbc', '_fbp', 'referrer' ];
+			$en_trop  = array_values( array_diff( $liste_du_serveur(), $liste_du_moteur(), $hors_url ) );
+
+			assert_same( [], $en_trop, 'clé(s) acceptée(s) que rien n’envoie' );
+		}
+	);
+
+	/* --- La voie JSON et la voie sans JavaScript ----------------------- */
+
+	test(
+		'le contexte du relais est lu sur la requête, jamais sur $_POST',
+		function (): void {
+			/*
+			 * Le défaut que ce test empêche de revenir, mesuré le 09/09/2026 par
+			 * un tir de bout en bout : `$_POST` n'est peuplé que par un corps
+			 * form-urlencoded ou multipart. Sur la voie JSON — celle du moteur
+			 * pour un formulaire sans pièce jointe, donc presque tous les envois
+			 * — il est **vide**.
+			 *
+			 * Le lead arrivait donc en base avec `tracking` à `[]`, `page_url`
+			 * sans query string et `lead_type` vide, alors que le navigateur
+			 * avait bien tout envoyé. Aucune erreur, aucune trace.
+			 *
+			 * On lit la source plutôt que d'exécuter la route : la doublure de
+			 * `WP_REST_Request` qu'il faudrait pour l'exercer serait elle-même à
+			 * tenir juste, et c'est la lecture de `$_POST` qu'on veut interdire.
+			 */
+			$source = (string) file_get_contents( __DIR__ . '/../anode-forms.php' );
+
+			// La portée du contrôle : la fonction qui reçoit la requête REST.
+			$deb = strpos( $source, "\$request->get_param( 'fields' )" );
+
+			assert_true( false !== $deb, 'appel REST à traiter() introuvable' );
+
+			$portee = substr( $source, max( 0, $deb - 1200 ), 2400 );
+
+			foreach ( [ 'tracking', 'page_url', 'lead_type' ] as $clef ) {
+				// Espacement libre : la source aligne ses flèches, et figer le
+				// nombre d'espaces ferait échouer le test sur une mise en forme.
+				assert_true(
+					1 === preg_match( "/'{$clef}'\\s*=>\\s*\\\$request->get_param\\(\\s*'{$clef}'\\s*\\)/", $portee ),
+					"« {$clef} » n'est pas pris sur la requête sur la voie JSON"
+				);
+			}
+		}
+	);
+
+	test(
+		'les trois lecteurs du contexte ne touchent plus $_POST',
+		function (): void {
+			// Une fonction pure se teste et ne dépend pas de la voie empruntée.
+			$source = (string) file_get_contents( __DIR__ . '/../anode-forms.php' );
+
+			foreach ( [ 'tracage_recu', 'page_url_recue', 'lead_type_recu' ] as $nom ) {
+				$deb = strpos( $source, "function {$nom}(" );
+
+				assert_true( false !== $deb, "{$nom}() introuvable" );
+
+				$corps = substr( $source, $deb, 1400 );
+
+				assert_true(
+					false === strpos( $corps, '$_POST' ),
+					"{$nom}() lit encore \$_POST — vide sur la voie JSON"
+				);
+			}
+		}
+	);
+
+	/* --- Conformité LFTF du corps relayé ------------------------------- */
+
+	test(
+		'les trois champs de consentement partent toujours, même absents',
+		function (): void {
+			/*
+			 * LFTF §6 : les trois partent toujours, à `null` pour ceux qui ne
+			 * s'appliquent pas. Un champ **absent** se lit en aval comme un
+			 * oubli d'implémentation ; un `null` affirme que le gestionnaire en
+			 * place ne fournit pas cette notion. Le filtre général écarte les
+			 * valeurs vides — sans traitement à part, les `null` y disparaissent.
+			 */
+			$recu = tracage_recu( [ 'utm_source' => 'google' ] );
+
+			assert_true( array_key_exists( 'consent_conversion_tracking', $recu ), 'consent_conversion_tracking absent' );
+			assert_true( array_key_exists( 'consent_remarketing', $recu ), 'consent_remarketing absent' );
+			assert_true( array_key_exists( 'consent_marketing', $recu ), 'consent_marketing absent' );
+			assert_same( null, $recu['consent_remarketing'], 'un consentement non fourni devrait valoir null' );
+		}
+	);
+
+	test(
+		'un consentement inventé par la page ne traverse pas',
+		function (): void {
+			// Seuls les trois états de la spec ont un sens en aval : une valeur
+			// libre irait jusqu'au CRM et y ferait décider une remontée.
+			$recu = tracage_recu(
+				[
+					'consent_conversion_tracking' => 'granted',
+					'consent_remarketing'         => 'peut-être',
+				]
+			);
+
+			assert_same( 'granted', $recu['consent_conversion_tracking'], 'un état valable devrait passer' );
+			assert_same( null, $recu['consent_remarketing'], 'un état inventé devrait valoir null' );
+		}
+	);
+
+	test(
+		'l’URL de page garde sa query string quand elle vient bien du site',
+		function (): void {
+			/*
+			 * C'est tout l'enjeu : plusieurs parcours servis par la même page ne
+			 * se distinguent que par la query string, et la reconstruction
+			 * serveur la perd.
+			 */
+			assert_same(
+				'https://exemple.test/formulaire/contact/?type=devis&utm_source=google',
+				page_url_recue( 'https://exemple.test/formulaire/contact/?type=devis&utm_source=google' ),
+				'query string perdue'
+			);
+		}
+	);
+
+	test(
+		'une URL de page d’un autre hôte est écartée',
+		function (): void {
+			// Une URL fournie par le client ne se relaie pas sur parole : sans
+			// ce contrôle, une page tierce choisirait ce qu'on écrit au CRM.
+			assert_same( '', page_url_recue( 'https://ailleurs.example/collecte/' ), 'hôte étranger accepté' );
+		}
+	);
+
+	test(
+		'le type de demande est borné, jamais du texte libre',
+		function (): void {
+			assert_same( 'devisexpress', lead_type_recu( 'Devis Express' ), 'type non assaini' );
+			assert_same( 50, mb_strlen( lead_type_recu( str_repeat( 'a', 200 ) ) ), 'type non borné en longueur' );
 		}
 	);
 

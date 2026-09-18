@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Anode — formulaires
  * Description: Réception, validation et relais des formulaires vers leurs webhooks — le site n'enregistre et ne notifie rien. Versant serveur du moteur assets/js/form-engine.js, en remplacement de l'élément « formulaire » de Bricks.
- * Version:     3.4.0
+ * Version:     3.5.0
  * Author:      Anode
  *
  * Pourquoi ne pas utiliser l'élément de Bricks : un seul écran, une validation
@@ -71,6 +71,25 @@ const PUBLIC_KEYS = [
 	'submitIcon',
 	'previousIcon',
 	'redirect',
+	/*
+	 * Type de demande par défaut, quand le CTA n'a pas porté de `?type=`
+	 * (LFTF §5). Il devient `form_anode` sur la page de confirmation, d'où
+	 * Piwik lit la conversion : sans valeur, une conversion remonterait sans
+	 * type et ne serait attribuée à rien.
+	 */
+	'leadType',
+	/*
+	 * Identifiant de site Piwik PRO, utile seulement là où plusieurs propriétés
+	 * Piwik cohabitent sur le même domaine : le moteur retient sinon le cookie
+	 * de consentement le plus récemment mis à jour.
+	 */
+	'piwikSiteId',
+	/*
+	 * Nom de l'écran dont la sortie déclenche un envoi INTERMÉDIAIRE, marqué
+	 * `partial: true` dans le corps relayé. Sans cette clé, rien ne change :
+	 * le comportement reste un envoi unique, à la fin.
+	 */
+	'relayOnScreen',
 ];
 
 /**
@@ -773,12 +792,33 @@ function handle( \WP_REST_Request $request ): \WP_REST_Response|\WP_Error {
 		return $limited;
 	}
 
+	/*
+	 * Le contexte se lit sur la REQUÊTE, et c'est tout l'enjeu.
+	 *
+	 * `$_POST` n'est peuplé que par un corps `form-urlencoded` ou multipart. Sur
+	 * la voie JSON — celle qu'emprunte le moteur pour un formulaire sans pièce
+	 * jointe, donc la grande majorité des envois — il est **vide**. Les valeurs
+	 * lues là arrivaient donc systématiquement absentes, sans erreur ni trace :
+	 * le bloc `tracking` partait à `[]`, `page_url` retombait sur la
+	 * reconstruction sans query string, et `lead_type` sur la chaîne vide.
+	 *
+	 * Mesuré le 09/09/2026 par un tir de bout en bout : le lead arrivait en
+	 * base avec une attribution entièrement vide, alors que le navigateur avait
+	 * bien tout envoyé. Une lecture de code ne le montre pas — les deux voies
+	 * se ressemblent, et celle qui marche est celle qu'on essaie le moins.
+	 */
 	$resultat = traiter(
 		$name,
 		$definition,
 		(array) $request->get_param( 'fields' ),
 		(string) $request->get_param( 'page' ),
-		$request->get_file_params()
+		$request->get_file_params(),
+		[
+			'tracking'  => $request->get_param( 'tracking' ),
+			'page_url'  => $request->get_param( 'page_url' ),
+			'lead_type' => $request->get_param( 'lead_type' ),
+			'partial'   => (bool) $request->get_param( 'partial' ),
+		]
 	);
 
 	if ( $resultat instanceof \WP_Error ) {
@@ -822,7 +862,7 @@ function handle( \WP_REST_Request $request ): \WP_REST_Response|\WP_Error {
  *
  * @return array{ok: bool, piege?: bool, id?: int, message?: string}|\WP_Error
  */
-function traiter( string $name, array $definition, array $submitted, string $page, array $recus = [] ): array|\WP_Error {
+function traiter( string $name, array $definition, array $submitted, string $page, array $recus = [], array $contexte = [] ): array|\WP_Error {
 	$declared = fields_of( $definition );
 
 	// Piège à robots : un champ que rien n'affiche, donc que seul un automate
@@ -835,7 +875,37 @@ function traiter( string $name, array $definition, array $submitted, string $pag
 	$errors   = [];
 	$fichiers = [];
 
+	/*
+	 * Envoi INTERMÉDIAIRE : le lead part dès que les coordonnées sont saisies,
+	 * puis à nouveau à la fin.
+	 *
+	 * Le formulaire d'origine faisait ainsi, et ce n'est pas un détail : une
+	 * personne qui abandonne sur la dernière question de qualification est
+	 * quand même un lead. La reproduire demande d'accepter un envoi dont les
+	 * écrans suivants n'ont pas encore été remplis.
+	 *
+	 * La garde reste entière là où elle compte : un envoi partiel ne valide que
+	 * les champs qu'il porte, il est marqué `partial: true` dans le corps
+	 * relayé, et l'envoi FINAL exige toujours tout. Un POST partiel forgé ne
+	 * produit donc qu'un lead partiel, annoncé comme tel — pas un contournement
+	 * des champs obligatoires.
+	 *
+	 * Aucun formulaire n'en fait l'usage tant que sa définition ne déclare pas
+	 * `relayOnScreen` : le comportement des autres projets ne change pas.
+	 */
+	$partiel = ! empty( $contexte['partial'] );
+
 	foreach ( $declared as $field_name => $field ) {
+		/*
+		 * Sur un envoi partiel, un champ que le visiteur n'a pas encore pu voir
+		 * n'est ni exigé ni relevé. On se fie à sa PRÉSENCE dans l'envoi, non à
+		 * un numéro d'écran : le serveur n'a pas à rejouer la navigation pour
+		 * savoir où en était la personne.
+		 */
+		if ( $partiel && ! array_key_exists( $field_name, $submitted ) ) {
+			continue;
+		}
+
 		/*
 		 * La condition est **réévaluée ici**, sur les réponses déjà retenues.
 		 *
@@ -973,7 +1043,7 @@ function traiter( string $name, array $definition, array $submitted, string $pag
 	 * c'est envoyé » suivi d'un silence, et mieux qu'une copie de secours dont
 	 * plus personne ne se souvient six mois plus tard.
 	 */
-	$relais = relayer( $name, $definition, $values, $page, $fichiers );
+	$relais = relayer( $name, $definition, $values, $page, $fichiers, $contexte );
 
 	// Les fichiers ont été relayés avec le reste : ils n'ont plus rien à faire
 	// sur le disque, quel que soit le sort de l'envoi.
@@ -1221,12 +1291,24 @@ function intercepter_envoi(): string {
 		return '';
 	}
 
+	/*
+	 * Ici `$_POST` est la bonne source : un envoi sans JavaScript est un POST
+	 * de formulaire classique. Le contexte est passé explicitement quand même,
+	 * pour que `relayer()` n'ait qu'une seule façon de l'obtenir.
+	 */
 	$resultat = traiter(
 		$name,
 		$definition,
 		$soumis,
 		(string) wp_parse_url( (string) ( $_SERVER['REQUEST_URI'] ?? '' ), PHP_URL_PATH ),
-		$recus
+		$recus,
+		[
+			// phpcs:disable WordPress.Security.NonceVerification.Missing
+			'tracking'  => $_POST['tracking'] ?? null,
+			'page_url'  => $_POST['page_url'] ?? null,
+			'lead_type' => $_POST['lead_type'] ?? null,
+			// phpcs:enable WordPress.Security.NonceVerification.Missing
+		]
 	);
 
 	if ( $resultat instanceof \WP_Error ) {
@@ -1761,7 +1843,21 @@ function repli_html( string $name ): string {
 		$fichiers ? ' enctype="multipart/form-data"' : '',
 		$corps,
 		esc_attr( $name ),
-		wp_nonce_field( action_nonce( $name ), '_anode_nonce', false, false )
+		/*
+		 * Le champ est écrit à la main, et non par `wp_nonce_field`.
+		 *
+		 * Celle-ci pose toujours `id` = `name`. Une page qui porte deux
+		 * formulaires — une page de contact en a souvent un court et un long —
+		 * servait donc deux fois `id="_anode_nonce"`, et trois avec le repli
+		 * sans JavaScript. Un identifiant répété est invalide, et un lecteur
+		 * d'écran comme un script ne trouvent que le premier.
+		 *
+		 * Un champ caché n'a aucun besoin d'identifiant : on ne le pose pas.
+		 */
+		sprintf(
+			'<input type="hidden" name="_anode_nonce" value="%s">',
+			esc_attr( wp_create_nonce( action_nonce( $name ) ) )
+		)
 	);
 }
 
@@ -1891,7 +1987,20 @@ function sanitize_field( mixed $value, array $field ): string|array|\WP_Error {
 	 * refuserait, mais un tableau imbriqué aurait déjà traversé les `trim` et
 	 * `strlen` qui suivent, avec des avertissements PHP dans le journal.
 	 */
-	$multiple = 'select' === $type && ! empty( $field['multiple'] );
+	/*
+	 * Une case à cocher À OPTIONS est multi-choix par nature : le navigateur en
+	 * envoie un tableau, et la validation qui suit sait déjà le parcourir et
+	 * contrôler chaque valeur contre les options déclarées.
+	 *
+	 * Ne reconnaître que le `select multiple` refusait donc tout groupe de cases,
+	 * sur « … : valeur inattendue » — un message qui accuse la VALEUR alors que
+	 * c'est sa FORME qui n'était pas prévue, et que rien dans la page n'explique.
+	 *
+	 * Relevé le 18/09/2026. Le défaut dort tant qu'aucune définition ne déclare de
+	 * cases à options : il ne se révèle qu'au premier formulaire qui en pose un.
+	 */
+	$multiple = ( 'select' === $type && ! empty( $field['multiple'] ) )
+		|| ( 'checkbox' === $type && ! empty( $field['options'] ) );
 
 	if ( is_object( $value ) || ( is_array( $value ) && ! $multiple ) ) {
 		return new \WP_Error( 'invalid', sprintf( '%s : valeur inattendue.', $label ) );
@@ -2540,7 +2649,7 @@ function nettoyer_fichiers( array $fichiers ): void {
  *
  * @return array<string, string>
  */
-function tracage_recu(): array {
+function tracage_recu( mixed $brut = null ): array {
 	$connues = [
 		'utm_source',
 		'utm_medium',
@@ -2552,12 +2661,25 @@ function tracage_recu(): array {
 		'msclkid',
 		'ttclid',
 		'li_fat_id',
+		/*
+		 * Substituts de `gclid` en mode consentement : Google envoie l'un des
+		 * deux **à la place** de `gclid`, jamais en plus. Absents d'ici, les
+		 * clics payants sans consentement publicitaire perdent leur attribution.
+		 */
+		'wbraid',
+		'gbraid',
+		// Identifiant de clic du Display de Google.
+		'dclid',
+		// Le niveau de l'annonce, celui où se décide un budget.
+		'campaign_id',
+		'adgroup_id',
+		'ad_id',
+		'meta_platform',
+		'meta_placement',
 		'_fbc',
 		'_fbp',
 		'referrer',
 	];
-
-	$brut = $_POST['tracking'] ?? null; // phpcs:ignore WordPress.Security.NonceVerification.Missing
 
 	// Sur la voie multipart, le relevé voyage en JSON dans un champ de texte.
 	if ( is_string( $brut ) ) {
@@ -2578,7 +2700,77 @@ function tracage_recu(): array {
 		}
 	}
 
+	/*
+	 * Les trois champs de consentement partent **toujours**, `null` compris
+	 * (LFTF §6). Ils ne peuvent donc pas passer par le filtre ci-dessus, qui
+	 * écarte les valeurs vides — un `null` y disparaîtrait.
+	 *
+	 * Et la distinction compte en aval : un champ **absent** se lit comme un
+	 * oubli d'implémentation, un champ à `null` affirme « le gestionnaire de
+	 * consentement en place ne fournit pas cette notion ». Les scénarios qui
+	 * décident d'une remontée de conversion sur cette valeur ont besoin de
+	 * savoir laquelle des deux situations ils lisent.
+	 *
+	 * Seuls les trois états de la spec sont acceptés : une valeur inventée par
+	 * une page vaudra `null` plutôt que de traverser jusqu'au CRM.
+	 */
+	$etats = [ 'granted', 'denied', 'unspecified' ];
+
+	foreach ( [ 'consent_conversion_tracking', 'consent_remarketing', 'consent_marketing' ] as $clef ) {
+		$valeur = $brut[ $clef ] ?? null;
+
+		$propre[ $clef ] = is_string( $valeur ) && in_array( $valeur, $etats, true ) ? $valeur : null;
+	}
+
 	return $propre;
+}
+
+/**
+ * L'URL complète de la page, **si elle vient bien de ce site**.
+ *
+ * Le serveur reconstruit `page_url` depuis le chemin reçu, et c'est la bonne
+ * prudence : une URL fournie par le client ne se relaie pas sur parole. Mais
+ * cette reconstruction **perd la query string**, et l'attribution en a besoin —
+ * plusieurs parcours servis par la même page ne se distinguent que par elle.
+ *
+ * D'où ce compromis : on accepte l'URL du client à la seule condition qu'elle
+ * pointe l'hôte du site. Une URL étrangère est écartée, et l'appelant retombe
+ * sur la reconstruction.
+ *
+ * @return string URL complète validée, ou chaîne vide.
+ */
+function page_url_recue( mixed $brut = null ): string {
+
+	if ( ! is_string( $brut ) || '' === $brut ) {
+		return '';
+	}
+
+	$candidate = esc_url_raw( wp_unslash( $brut ) );
+	$hote      = wp_parse_url( $candidate, PHP_URL_HOST );
+
+	if ( ! is_string( $hote ) || $hote !== wp_parse_url( home_url( '/' ), PHP_URL_HOST ) ) {
+		return '';
+	}
+
+	return mb_substr( $candidate, 0, 1000 );
+}
+
+/**
+ * Le type de demande, celui du `?type=` porté par le CTA (LFTF §5).
+ *
+ * Il sert de clé d'attribution par type de conversion, et se retrouve en
+ * `form_anode` sur la page de confirmation. Une valeur libre n'a rien à faire
+ * dans un CRM : on la borne à un identifiant court.
+ */
+function lead_type_recu( mixed $brut = null ): string {
+
+	if ( ! is_string( $brut ) ) {
+		return '';
+	}
+
+	$propre = strtolower( sanitize_key( wp_unslash( $brut ) ) );
+
+	return mb_substr( $propre, 0, 50 );
 }
 
 /**
@@ -2745,7 +2937,7 @@ function relais_declares( array $definition ): array {
  * @return true|\WP_Error true dès qu'un destinataire a répondu ; une erreur si
  *                        aucun relais n'est déclaré, ou si tous ont échoué.
  */
-function relayer( string $name, array $definition, array $values, string $page, array $fichiers = [] ) {
+function relayer( string $name, array $definition, array $values, string $page, array $fichiers = [], array $contexte = [] ) {
 	$urls = relais_declares( $definition );
 
 	if ( ! $urls ) {
@@ -2856,8 +3048,22 @@ function relayer( string $name, array $definition, array $values, string $page, 
 			'form'         => $name,
 			'fields'       => $values,
 			'files'        => $pieces,
-			'tracking'     => tracage_recu(),
-			'page_url'     => '' !== $page ? home_url( $page ) : home_url( '/' ),
+			'tracking'     => tracage_recu( $contexte['tracking'] ?? null ),
+			/*
+			 * L'URL du client d'abord — elle seule porte la query string, dont
+			 * dépend l'attribution — et la reconstruction en repli quand elle
+			 * est absente ou qu'elle désigne un autre hôte.
+			 */
+			'page_url'     => page_url_recue( $contexte['page_url'] ?? null )
+				?: ( '' !== $page ? home_url( $page ) : home_url( '/' ) ),
+			'lead_type'    => lead_type_recu( $contexte['lead_type'] ?? null ),
+			/*
+			 * Dit explicitement à l'aval qu'il reçoit un lead incomplet, et
+			 * qu'un second envoi suivra pour la même personne. Sans ce
+			 * drapeau, le scénario compterait deux conversions et créerait
+			 * deux fiches.
+			 */
+			'partial'      => ! empty( $contexte['partial'] ),
 			'site'         => home_url( '/' ),
 			'submitted_at' => gmdate( 'c' ),
 			'user_agent'   => isset( $_SERVER['HTTP_USER_AGENT'] ) ? sanitize_text_field( wp_unslash( (string) $_SERVER['HTTP_USER_AGENT'] ) ) : '',
