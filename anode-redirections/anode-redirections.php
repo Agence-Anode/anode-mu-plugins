@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Anode — redirections
  * Description: Redirections 301 depuis les anciennes URL d'un site refondu, lues dans un fichier versionné du thème. Remplace Redirection et consorts.
- * Version:     1.3.0
+ * Version:     1.4.0
  * Author:      Anode
  *
  * Une refonte casse les adresses. Sans redirections, chaque lien entrant — un
@@ -48,7 +48,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-const VERSION = '1.3.0';
+const VERSION = '1.4.0';
 
 /**
  * Statuts que l'on accepte de renvoyer.
@@ -473,6 +473,29 @@ add_action(
 
 		if ( 410 === $cible['statut'] ) {
 			status_header( 410 );
+
+			/*
+			 * **`status_header()` pose l'en-tête, il n'arrête pas la requête**
+			 * — et il ne doit pas : un 410 rend quand même un document, celui
+			 * de la page d'erreur, sinon le visiteur reçoit un écran blanc.
+			 *
+			 * Mais `redirect_canonical` passe ensuite, en priorité 10, et sur
+			 * une 404 il **devine** un permalien dont le slug commence pareil.
+			 * Sa 301 écrase alors le 410, en silence. Mesuré le 28/09/2026 sur
+			 * une préproduction du parc : seize adresses disparues rendaient
+			 * bien 410, la dix-septième partait en 301 vers une page dont le
+			 * slug commençait par le sien — `x-redirect-by: WordPress` dans les
+			 * en-têtes, et rien d'autre pour le dire.
+			 *
+			 * Le banc, lui, était vert : il éprouve `resolve()`, qui rendait
+			 * bien le statut 410. Le défaut vivait dans ce qui en est fait.
+			 *
+			 * Sur une adresse déclarée disparue, il n'y a rien de canonique à
+			 * chercher : on retire les deux chemins, pas seulement la devinette
+			 * — `redirect_canonical` redirige aussi pour d'autres motifs.
+			 */
+			remove_action( 'template_redirect', 'redirect_canonical' );
+			add_filter( 'do_redirect_guess_404_permalink', '__return_false' );
 
 			return;
 		}

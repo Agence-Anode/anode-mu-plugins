@@ -517,6 +517,64 @@ test(
 	}
 );
 
+/* --- Le 410 tient-il jusqu'au visiteur ? ----------------------------- */
+
+/**
+ * Retire les commentaires d'un source PHP, pour qu'une mesure de présence
+ * porte sur du **code**.
+ *
+ * Les chaînes restent : ce qu'on cherche ici est un appel dont les arguments
+ * en sont — retirer les chaînes rendrait le test faux dans l'autre sens.
+ *
+ * Sans cela, la prose satisfait la preuve : le commentaire qui explique
+ * pourquoi on retire `redirect_canonical` contient son nom, et le test
+ * passerait sur un fichier dont on aurait supprimé l'appel.
+ */
+function code_seul( string $source ): string {
+	$sortie = '';
+
+	foreach ( token_get_all( $source ) as $t ) {
+		if ( is_array( $t ) ) {
+			if ( in_array( $t[0], [ T_COMMENT, T_DOC_COMMENT, T_INLINE_HTML ], true ) ) {
+				continue;
+			}
+
+			$sortie .= $t[1];
+			continue;
+		}
+
+		$sortie .= $t;
+	}
+
+	return $sortie;
+}
+
+$source = (string) file_get_contents( dirname( __DIR__ ) . '/anode-redirections.php' );
+$code   = code_seul( $source );
+
+test(
+	'le dépouilleur retire bien la prose',
+	function () use ( $source, $code ): void {
+		// Le témoin : une phrase qui n'existe QUE dans un commentaire du
+		// fichier. Si elle survit au dépouillement, tout ce qui suit ment.
+		assert_same( true, str_contains( $source, 'écrase alors le 410' ), 'la phrase est bien dans le fichier' );
+		assert_same( false, str_contains( $code, 'écrase alors le 410' ), 'et absente du code seul' );
+	}
+);
+
+test(
+	'une adresse disparue neutralise la redirection canonique de WordPress',
+	function () use ( $code ): void {
+		/*
+		 * `status_header( 410 )` ne termine pas la requête. `redirect_canonical`
+		 * passe ensuite et devine un permalien proche : sa 301 écrase le 410.
+		 * Mesuré le 28/09/2026 — une adresse sur dix-sept partait ainsi.
+		 */
+		assert_same( true, str_contains( $code, "remove_action( 'template_redirect', 'redirect_canonical' )" ), 'redirect_canonical retiré' );
+		assert_same( true, str_contains( $code, "do_redirect_guess_404_permalink" ), 'devinette coupée' );
+	}
+);
+
 printf( "\n%d test(s) réussi(s), %d échec(s).\n", $passed, $failed );
 
 unlink( $journal );
