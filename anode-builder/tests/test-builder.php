@@ -1032,6 +1032,143 @@ test( 'une classe portée par un élément n’est jamais alourdie', function ()
 	);
 } );
 
+/*
+ * Le poids des modificateurs — la limite du 02/10/2026, et sa levée.
+ *
+ * `classes_hors_index()` ne couvrait qu'une moitié du défaut : une classe
+ * qu'aucun élément ne porte. Un modificateur écrit dans un arbre de page EST
+ * porté, donc il n'entrait dans aucun des deux cas ci-dessus — et sa base le
+ * recouvrait quand même, parce que les quatre règles sortent à 0-2-0 et que
+ * Bricks les réémet dans l'ordre de ses identifiants internes, pas dans celui
+ * de la cascade BEM.
+ *
+ * Ces cas-ci tiennent la décision. Trois sont des tests d'**absence** : c'est
+ * la forme qui protège le §5, puisque alourdir une classe sans concurrent
+ * ferait gagner notre valeur figée contre celle du panneau.
+ */
+
+test( 'un modificateur dont la base est sur la page est servi plus lourd', function (): void {
+	// Mesuré le 02/10/2026 dans le canevas de viceversa : `.c-bouton.brxe-block`
+	// (979213) était émise APRÈS `.c-bouton--petit.brxe-block` (198331), à
+	// spécificité égale. Tous les boutons du builder s'affichaient à 15px/13px
+	// quand le front en rendait 14px/7px.
+	\Bricks\Database::$global_data['globalClasses'] = [
+		[ 'id' => '979213', 'name' => 'c-bouton' ],
+		[ 'id' => '198331', 'name' => 'c-bouton--petit' ],
+	];
+
+	assert_same(
+		[ '198331' => [ 'block' ] ],
+		modificateurs_sous_leur_base(
+			[ '979213' => [ 'block' ], '198331' => [ 'block' ] ]
+		),
+		'le modificateur doit être alourdi, et sa base jamais'
+	);
+} );
+
+test( 'un modificateur seul sur sa page n’est pas alourdi', function (): void {
+	/*
+	 * Le test d'absence qui protège le §5. Sans sa base sur la page, rien ne
+	 * recouvre le modificateur : l'alourdir ne corrigerait aucun défaut et
+	 * ferait perdre le panneau. Une valeur changée dans le builder cesserait
+	 * d'apparaître — exactement le défaut inverse de celui qu'on corrige.
+	 */
+	\Bricks\Database::$global_data['globalClasses'] = [
+		[ 'id' => '198331', 'name' => 'c-bouton--petit' ],
+	];
+
+	assert_same(
+		[],
+		modificateurs_sous_leur_base( [ '198331' => [ 'block' ] ] ),
+		'un modificateur sans sa base n’a aucun concurrent à battre'
+	);
+} );
+
+test( 'une classe sans modificateur n’est jamais alourdie', function (): void {
+	// Un test d'absence : `c-bouton` et `c-hero` sont des bases. Les alourdir
+	// les ferait gagner contre leurs propres modificateurs, ce qui inverse la
+	// sémantique BEM au lieu de la rétablir.
+	\Bricks\Database::$global_data['globalClasses'] = [
+		[ 'id' => '111', 'name' => 'c-bouton' ],
+		[ 'id' => '222', 'name' => 'c-hero__titre' ],
+	];
+
+	assert_same(
+		[],
+		modificateurs_sous_leur_base( [ '111' => [ 'block' ], '222' => [ 'heading' ] ] )
+	);
+} );
+
+test( 'un nom qui commence par le séparateur n’est pas un modificateur', function (): void {
+	/*
+	 * `Validator::BEM_PATTERN` l'interdit, mais une classe posée à la main dans
+	 * le builder ne passe pas par le pont, et Bricks garde des classes au nom
+	 * vide — le test voisin en montre une.
+	 *
+	 * Le piège se **pose**, il ne s'attend pas. Avec le seul `--orphelin`, la
+	 * base cherchée est la chaîne vide, qu'aucun nom présent ne porte : le cas
+	 * se refusait par l'autre garde, et muter celle-ci ne faisait rien tomber.
+	 * C'est le travers du §15 bis — « un banc dont les données ne contiennent
+	 * pas le cas à éprouver ». Il faut donc la classe au nom vide **sur la
+	 * page**, et alors la base vide existe.
+	 */
+	\Bricks\Database::$global_data['globalClasses'] = [
+		[ 'id' => '111', 'name' => '--orphelin' ],
+		[ 'id' => '222', 'name' => '' ],
+	];
+
+	assert_same(
+		[],
+		modificateurs_sous_leur_base( [ '111' => [ 'block' ], '222' => [ 'block' ] ] ),
+		'la chaîne vide n’est pas une base'
+	);
+} );
+
+test( 'un modificateur d’élément suit la même règle que son bloc', function (): void {
+	// `c-hero__titre--demi` doit battre `c-hero__titre` : la base d'un
+	// modificateur est tout ce qui précède le séparateur, élément BEM compris.
+	\Bricks\Database::$global_data['globalClasses'] = [
+		[ 'id' => '111', 'name' => 'c-hero__titre' ],
+		[ 'id' => '222', 'name' => 'c-hero__titre--demi' ],
+		[ 'id' => '333', 'name' => 'c-hero' ],
+	];
+
+	assert_same(
+		[ '222' => [ 'heading' ] ],
+		modificateurs_sous_leur_base(
+			[ '111' => [ 'heading' ], '222' => [ 'heading' ], '333' => [ 'section' ] ]
+		),
+		'la base d’un modificateur d’élément n’est pas le bloc'
+	);
+} );
+
+test( 'une classe absente des classes globales est ignorée', function (): void {
+	// La carte vient des éléments de la page, les noms de la base : les deux
+	// peuvent diverger. Un identifiant sans nom ne doit pas faire deviner une
+	// base — ce qui alourdirait une classe au hasard.
+	\Bricks\Database::$global_data['globalClasses'] = [
+		[ 'id' => '111', 'name' => 'c-bouton' ],
+	];
+
+	assert_same(
+		[],
+		modificateurs_sous_leur_base( [ '111' => [ 'block' ], '999' => [ 'block' ] ] )
+	);
+} );
+
+test( 'les modificateurs rejoignent les classes hors index, sans les écraser', function (): void {
+	/*
+	 * Les deux familles s'additionnent : une classe hors index qui serait aussi
+	 * un modificateur garde la valeur de la première. `array_merge` ferait la
+	 * même chose ici, mais sur des clés numériques il **réindexerait** — et les
+	 * clés sont des identifiants Bricks.
+	 */
+	assert_true(
+		str_contains( code_php(), '$horsIndex + modificateurs_sous_leur_base( $carte )' ),
+		'les deux familles doivent s’additionner par union de clés'
+	);
+} );
+
 test( 'seul le nom des classes visées est doublé', function (): void {
 	\Bricks\Database::$global_data['globalClasses'] = [
 		[ 'id' => '111', 'name' => 'c-entete' ],

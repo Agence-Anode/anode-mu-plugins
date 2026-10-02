@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Anode — confort du builder
  * Description: Cinq manques de Bricks Builder, comblés sans extension tierce : la classe active reste sélectionnée, un curseur balaie les largeurs au pixel, un double-clic dans la structure ouvre un composant, le canevas reçoit le CSS des classes globales, et ce qu'une entrée au défilement y masquerait reste visible.
- * Version:     2.3.0
+ * Version:     2.5.0
  * Author:      Anode
  * Requires PHP: 8.1
  *
@@ -132,6 +132,35 @@ const DEFAUTS = [
  * Un site qui emploie d'autres noms les déclare par `anode/builder/revelation`.
  */
 const REVELATION = [
+	/*
+	 * `u-js` reste retirée — et la question a été mesurée, pas tranchée d'avance.
+	 *
+	 * Le grief contre ce retrait est réel : la classe garde bien plus que des
+	 * masques. Relevé le 07/08/2026 sur un site en préproduction, **192 règles**
+	 * y sont conditionnées — 115 dans le CSS personnalisé global, 77 dans la
+	 * feuille du thème :
+	 *
+	 *     97 masquent (opacity: 0, visibility: hidden)   ← ce qu'on vise
+	 *     95 sont des styles ordinaires                  ← ce qu'on tue avec
+	 *
+	 * Ces 95 cessent donc de s'appliquer dans le builder : un rembourrage de
+	 * 22 px au lieu de 26, une section en `relative` au lieu de `sticky`.
+	 *
+	 * **Le remplacement a été essayé, et il est pire.** Garder `u-js` et
+	 * neutraliser les seuls masques en réémettant leur propre sélecteur en
+	 * `!important` donne, mesuré sur la même page :
+	 *
+	 *     garde `:not(.is-…)` seule   →  10 masques sur 97 attrapés, page trouée
+	 *     garde élargie à `.u-js`     →  32 éléments invisibles contre 0
+	 *
+	 * Deux règles de même sélecteur et de même `!important` se départagent par
+	 * l'ordre d'insertion, et Bricks écrit ses feuilles après `wp_footer`.
+	 *
+	 * L'arbitrage : un builder aux styles légèrement différents reste utilisable,
+	 * un builder à trous ne l'est pas. Le jour où on y reviendra, ce sera par une
+	 * feuille injectée dans le canevas **après** celles de Bricks — pas depuis
+	 * `wp_footer`.
+	 */
 	'retirer' => [ 'u-js', 'js', 'is-revealable' ],
 	'ajouter' => [],
 ];
@@ -453,6 +482,106 @@ function dernier_hors_index( ?int $nombre = null ): int {
 }
 
 /**
+ * Les modificateurs dont la classe de base est portée par la même page.
+ *
+ * ## Pourquoi ils doivent peser plus lourd
+ *
+ * Le correctif de 2.2.1 n'alourdit que les classes **hors index** — celles
+ * qu'aucun élément ne porte. Un modificateur écrit en dur dans l'arbre d'une
+ * page n'en fait pas partie : il est porté, donc Bricks l'émet, donc il reste à
+ * la même spécificité que sa base (0-2-0). C'est alors **l'ordre** qui tranche,
+ * et le JavaScript de Bricks réémet ses classes dans l'ordre de ses
+ * identifiants internes, pas dans l'ordre base → modificateur.
+ *
+ * Mesuré le 02/10/2026 sur une page du parc, par `CSS.getMatchedStylesForNode` :
+ *
+ *     anode-classes-canevas       .c-bouton.brxe-block          15px / 13px
+ *     anode-classes-canevas       .c-bouton--petit.brxe-block   14px /  7px
+ *     bricks-global-class-198331  .c-bouton--petit.brxe-block   14px /  7px
+ *     bricks-global-class-979213  .c-bouton.brxe-block          15px / 13px   ← dernier
+ *
+ * `c-bouton` porte l'identifiant le plus grand, donc Bricks l'émet en dernier,
+ * donc la base gagne : quatre classes rendues différemment et vingt-cinq écarts
+ * sur une seule page, tous les boutons du site à la mauvaise taille **dans le
+ * builder** pendant que le front est juste au pixel.
+ *
+ * ## Pourquoi cela ne rend aucun panneau inerte
+ *
+ * C'est la seule réserve du §5, et elle ne s'applique pas ici : on alourdit le
+ * modificateur, pas la base. Le panneau du modificateur reste donc le plus fort
+ * — ce qui est précisément la sémantique BEM, « le modificateur s'ajoute au bloc
+ * et le surcharge » —, et celui de la base continue d'agir sur tout élément qui
+ * ne porte pas le modificateur. Une modification faite dans le builder reste
+ * visible des deux côtés.
+ *
+ * La base doit être **dans la même carte** : alourdir un modificateur dont la
+ * base n'est pas sur la page ne corrigerait rien et ferait peser une règle de
+ * plus sans raison.
+ *
+ * @param array<string, array<int, string>> $carte Carte des classes portées.
+ * @return array<string, array<int, string>> Sous-ensemble à servir plus lourd.
+ */
+function modificateurs_sous_leur_base( array $carte ): array {
+	$classes = \Bricks\Database::$global_data['globalClasses'] ?? [];
+
+	if ( ! is_array( $classes ) || ! $carte ) {
+		return [];
+	}
+
+	$nomParId = [];
+
+	foreach ( $classes as $classe ) {
+		if ( is_array( $classe ) && isset( $classe['id'], $classe['name'] ) ) {
+			$nomParId[ (string) $classe['id'] ] = (string) $classe['name'];
+		}
+	}
+
+	/*
+	 * Les noms présents sur la page, pour répondre « la base est-elle là ? ».
+	 *
+	 * Le refus de la chaîne vide n'est pas une précaution de forme : c'est lui
+	 * qui écarte un nom commençant par le séparateur — `--orphelin`, qu'une
+	 * classe posée à la main dans le builder peut porter, puisqu'elle ne passe
+	 * pas par `Validator::BEM_PATTERN`. Sa base est la chaîne vide, et cette
+	 * ligne garantit qu'aucune page ne la déclare présente.
+	 *
+	 * Un premier jet testait aussi `0 === $sep` juste en dessous. La condition
+	 * était **inatteignable** — la base vide ne pouvant pas entrer ici, elle ne
+	 * pouvait jamais être trouvée plus bas — et la muter ne faisait tomber aucun
+	 * cas. Retirée : une garde qu'aucun piège ne peut atteindre ne protège rien,
+	 * elle rassure (§15 bis).
+	 */
+	$nomsPresents = [];
+
+	foreach ( array_keys( $carte ) as $id ) {
+		$nom = $nomParId[ (string) $id ] ?? '';
+
+		if ( '' !== $nom ) {
+			$nomsPresents[ $nom ] = true;
+		}
+	}
+
+	$vises = [];
+
+	foreach ( $carte as $id => $types ) {
+		$nom = $nomParId[ (string) $id ] ?? '';
+		$sep = strpos( $nom, '--' );
+
+		if ( '' === $nom || false === $sep ) {
+			continue;
+		}
+
+		$base = substr( $nom, 0, $sep );
+
+		if ( isset( $nomsPresents[ $base ] ) ) {
+			$vises[ (string) $id ] = $types;
+		}
+	}
+
+	return $vises;
+}
+
+/**
  * Double le nom des classes visées, le temps d'une génération.
  *
  * On ne réécrit pas le CSS produit : Bricks construit son sélecteur à partir du
@@ -659,7 +788,15 @@ function css_des_classes_globales( int $post_id ): string {
 	 * `.c-entete--centre` rendue `row flex-end` dans le canevas contre
 	 * `column center` sur le front, et `.c-ligne--finale` à 16 px au lieu de 18.
 	 */
-	return generer_css( $carte ) . generer_css( $horsIndex, true );
+	/*
+	 * Les modificateurs portés rejoignent les classes hors index dans la passe
+	 * lourde : eux aussi perdent contre leur base, mais pour une autre raison —
+	 * l'ordre de réémission de Bricks, et non l'absence d'émission. Voir
+	 * `modificateurs_sous_leur_base()`.
+	 */
+	$lourdes = $horsIndex + modificateurs_sous_leur_base( $carte );
+
+	return generer_css( $carte ) . generer_css( $lourdes, true );
 }
 
 /**
