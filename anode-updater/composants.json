@@ -4,48 +4,53 @@
   "cle_publique": "L4SylLNVrLSlifCVAcbDn8Ubha4Hudz34wcgxLAm8PQ=",
   "composants": {
     "anode-hardening": {
-      "repo": "theoanode/anode-mu-plugins",
+      "repo": "Agence-Anode/anode-mu-plugins",
       "chemin": "anode-hardening",
       "source": "blueprint/mu-plugins/anode-hardening"
     },
     "anode-seo": {
-      "repo": "theoanode/anode-mu-plugins",
+      "repo": "Agence-Anode/anode-mu-plugins",
       "chemin": "anode-seo",
       "source": "blueprint/mu-plugins/anode-seo"
     },
     "anode-forms": {
-      "repo": "theoanode/anode-mu-plugins",
+      "repo": "Agence-Anode/anode-mu-plugins",
       "chemin": "anode-forms",
       "source": "blueprint/mu-plugins/anode-forms"
     },
     "anode-redirections": {
-      "repo": "theoanode/anode-mu-plugins",
+      "repo": "Agence-Anode/anode-mu-plugins",
       "chemin": "anode-redirections",
       "source": "blueprint/mu-plugins/anode-redirections"
     },
     "anode-updater": {
-      "repo": "theoanode/anode-mu-plugins",
+      "repo": "Agence-Anode/anode-mu-plugins",
       "chemin": "anode-updater",
       "source": "blueprint/mu-plugins/anode-updater"
     },
     "anode-builder": {
-      "repo": "theoanode/anode-mu-plugins",
+      "repo": "Agence-Anode/anode-mu-plugins",
       "chemin": "anode-builder",
       "source": "blueprint/mu-plugins/anode-builder"
     },
     "anode-animations": {
-      "repo": "theoanode/anode-mu-plugins",
+      "repo": "Agence-Anode/anode-mu-plugins",
       "chemin": "anode-animations",
       "source": "blueprint/mu-plugins/anode-animations"
     },
     "anode-plan": {
-      "repo": "theoanode/anode-mu-plugins",
+      "repo": "Agence-Anode/anode-mu-plugins",
       "chemin": "anode-plan",
       "source": "blueprint/mu-plugins/anode-plan"
     },
     "anode-bridge": {
-      "repo": "theoanode/anode-bridge",
+      "repo": "Agence-Anode/anode-bridge",
       "source": "plugin/anode-bridge"
+    },
+    "anode-retours": {
+      "repo": "Agence-Anode/anode-mu-plugins",
+      "chemin": "anode-retours",
+      "source": "blueprint/mu-plugins/anode-retours"
     }
   }
 }
