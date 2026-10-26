@@ -1,8 +1,8 @@
 <?php
 /**
  * Plugin Name: Anode — durcissement
- * Description: Sécurité de base sans extension tierce : URL de connexion masquée, limitation des tentatives, en-têtes de sécurité, XML-RPC coupé, énumération des comptes bloquée.
- * Version:     1.7.0
+ * Description: Sécurité de base sans extension tierce : URL de connexion masquée, limitation des tentatives, double authentification par e-mail (sur option), en-têtes de sécurité, XML-RPC coupé, énumération des comptes bloquée.
+ * Version:     1.8.0
  * Author:      Anode
  *
  * Remplace SecuPress Pro et WPS Hide Login.
@@ -1155,3 +1155,10 @@ add_action(
 		);
 	}
 );
+
+/* ------------------------------------------------------------------ */
+/* Double authentification                                             */
+/* ------------------------------------------------------------------ */
+
+// Fichier à part : c'est un parcours entier, éteint sauf `ANODE_2FA_EMAIL`.
+require_once __DIR__ . '/double-authentification.php';

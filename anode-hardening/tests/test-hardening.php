@@ -54,6 +54,13 @@ function reinitialiser( array $depart = [] ): void {
 
 reinitialiser();
 
+function wp_salt(): string {
+	return 'sel-de-test';
+}
+function did_action(): int {
+	return 1;
+}
+
 function get_option( string $nom, $defaut = false ) {
 	global $etat;
 
@@ -789,6 +796,61 @@ test( 'un refus déjà décidé ailleurs n’est pas remplacé', function (): vo
 	$deja = new \WP_Error( 'autre_chose', 'motif d’origine' );
 
 	assertSame( 'autre_chose', dispatcher( '/wp/v2/pages', $deja )->get_error_code() );
+} );
+
+/* --- Double authentification ---------------------------------------- */
+
+section( 'Double authentification par e-mail' );
+
+test( 'éteinte sans la constante', function (): void {
+	// Allumée par défaut, elle fermerait tout site dont l'envoi d'e-mails échoue.
+	assertTrue( ! deux_facteurs_actif() );
+} );
+
+test( 'le code a toujours six chiffres, zéros de tête compris', function (): void {
+	for ( $i = 0; $i < 500; $i++ ) {
+		assertTrue( 1 === preg_match( '/^\d{6}$/', nouveau_code() ) );
+	}
+} );
+
+$attente_type = static fn ( array $plus = [] ): array => array_merge(
+	[ 'empreinte' => empreinte_code( '012345' ), 'jusqua' => 1000, 'essais' => 0, 'envois' => 1, 'envoye' => 900 ],
+	$plus
+);
+
+test( 'le bon code passe, même tapé avec des espaces', function () use ( $attente_type ): void {
+	assertSame( 'ok', juger_code( $attente_type(), '012345', 950 )['verdict'] );
+	assertSame( 'ok', juger_code( $attente_type(), ' 012 345 ', 950 )['verdict'] );
+} );
+
+test( 'un code faux est compté', function () use ( $attente_type ): void {
+	$j = juger_code( $attente_type(), '999999', 950 );
+
+	assertSame( 'faux', $j['verdict'] );
+	assertSame( 1, $j['attente']['essais'] );
+} );
+
+test( 'le cinquième code faux épuise l’attente', function () use ( $attente_type ): void {
+	assertSame( 'epuise', juger_code( $attente_type( [ 'essais' => ESSAIS_CODE - 1 ] ), '999999', 950 )['verdict'] );
+} );
+
+test( 'un code juste mais expiré est refusé', function () use ( $attente_type ): void {
+	assertSame( 'expire', juger_code( $attente_type(), '012345', 1001 )['verdict'] );
+} );
+
+test( 'un code tronqué ne passe pas', function () use ( $attente_type ): void {
+	assertSame( 'faux', juger_code( $attente_type(), '12345', 950 )['verdict'] );
+} );
+
+test( 'le renvoi attend une minute et s’arrête à trois envois', function () use ( $attente_type ): void {
+	assertTrue( ! renvoi_permis( $attente_type(), 900 + DELAI_RENVOI - 1 ) );
+	assertTrue( renvoi_permis( $attente_type(), 900 + DELAI_RENVOI ) );
+	assertTrue( ! renvoi_permis( $attente_type( [ 'envois' => ENVOIS_MAX ] ), 2000 ) );
+} );
+
+test( 'la base ne garde ni le code ni le jeton', function (): void {
+	assertTrue( empreinte_code( '012345' ) !== '012345' );
+	assertTrue( ! str_contains( cle_attente( 'jeton-secret' ), 'jeton-secret' ) );
 } );
 
 /* --- Compte rendu ---------------------------------------------------- */
