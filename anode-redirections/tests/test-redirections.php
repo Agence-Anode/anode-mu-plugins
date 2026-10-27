@@ -34,7 +34,15 @@ function wp_parse_url( string $url, int $component = -1 ) {
 		return false;
 	}
 
-	return PHP_URL_PATH === $component ? ( $parts['path'] ?? '' ) : $parts;
+	if ( PHP_URL_PATH === $component ) {
+		return $parts['path'] ?? '';
+	}
+
+	if ( PHP_URL_QUERY === $component ) {
+		return $parts['query'] ?? null;
+	}
+
+	return $parts;
 }
 
 function add_action(): void {}
@@ -130,6 +138,35 @@ test(
 	function (): void {
 		assert_same( '/', normalize( '/' ), 'racine' );
 		assert_same( '/', normalize( '' ), 'chaîne vide' );
+	}
+);
+
+echo "\nChaîne de requête\n";
+
+test(
+	'les paramètres de campagne suivent la redirection',
+	function (): void {
+		// Une annonce Google Ads garde l'ancienne adresse : sans report, le
+		// gclid disparaît à la 301, et la conversion n'est plus attribuée.
+		assert_same( '/accueil-rse/?gclid=abc&utm_source=google', with_query( '/accueil-rse/', '/ancienne/?gclid=abc&utm_source=google' ), 'report' );
+		assert_same( '/accueil-rse/', with_query( '/accueil-rse/', '/ancienne/' ), 'sans requête' );
+	}
+);
+
+test(
+	'la destination garde la main sur ses propres paramètres',
+	function (): void {
+		assert_same( '/contact/?form=devis&gclid=abc', with_query( '/contact/?form=devis', '/old/?form=autre&gclid=abc' ), 'fusion' );
+		assert_same( '/contact/?a=1#formulaire', with_query( '/contact/#formulaire', '/old/?a=1' ), 'ancre en dernier' );
+		assert_same( 'https://shop.exemple.fr/?ref=x', with_query( 'https://shop.exemple.fr/', '/boutique/?ref=x' ), 'destination externe' );
+	}
+);
+
+test(
+	'le report est branché sur la redirection servie',
+	function (): void {
+		$source = (string) file_get_contents( dirname( __DIR__ ) . '/anode-redirections.php' );
+		assert_same( true, str_contains( $source, "\$cible['vers'] = with_query( \$cible['vers']" ), 'appel présent' );
 	}
 );
 

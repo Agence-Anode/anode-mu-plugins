@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Anode — redirections
  * Description: Redirections 301 depuis les anciennes URL d'un site refondu, lues dans un fichier versionné du thème. Remplace Redirection et consorts.
- * Version:     1.4.0
+ * Version:     1.5.0
  * Author:      Anode
  *
  * Une refonte casse les adresses. Sans redirections, chaque lien entrant — un
@@ -48,7 +48,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-const VERSION = '1.4.0';
+const VERSION = '1.5.0';
 
 /**
  * Statuts que l'on accepte de renvoyer.
@@ -346,6 +346,54 @@ function masked( array $motifs ): array {
 }
 
 /**
+ * Reporte la chaîne de requête de l'adresse demandée sur la destination.
+ *
+ * Une ancienne adresse arrive rarement nue : une annonce Google Ads y ajoute
+ * `?gclid=…`, une newsletter `?utm_source=…`. Sans report, la 301 les perdait,
+ * et avec eux l'attribution des conversions — l'annonce continuait de tourner,
+ * mais ses demandes de contact n'étaient plus comptées (labelequipee, recette du
+ * 27/10/2026 : dix-huit anciennes adresses encore servies par les annonces).
+ *
+ * Les paramètres de la destination passent en premier ; ceux de la demande
+ * suivent, sauf ceux que la destination fixe déjà — la table a le dernier mot
+ * sur ce qu'elle déclare.
+ */
+function with_query( string $vers, string $demande ): string {
+	$requete = (string) wp_parse_url( $demande, PHP_URL_QUERY );
+
+	if ( '' === $requete ) {
+		return $vers;
+	}
+
+	$ancre = '';
+	$diese = strpos( $vers, '#' );
+
+	if ( false !== $diese ) {
+		$ancre = substr( $vers, $diese );
+		$vers  = substr( $vers, 0, $diese );
+	}
+
+	$point = strpos( $vers, '?' );
+
+	if ( false === $point ) {
+		return $vers . '?' . $requete . $ancre;
+	}
+
+	parse_str( substr( $vers, $point + 1 ), $fixes );
+
+	$ajouts = array_filter(
+		explode( '&', $requete ),
+		static function ( string $paire ) use ( $fixes ): bool {
+			$cle = urldecode( explode( '=', $paire, 2 )[0] );
+
+			return '' !== $cle && ! array_key_exists( preg_replace( '/\[.*$/', '', $cle ), $fixes );
+		}
+	);
+
+	return $vers . ( $ajouts ? '&' . implode( '&', $ajouts ) : '' ) . $ancre;
+}
+
+/**
  * Cherche la destination d'un chemin.
  *
  * @param array{exactes: array<string, string>, motifs: array<int, array<string, string>>, disparues: array<int, string>} $table
@@ -505,6 +553,8 @@ add_action(
 		if ( '' === $cible['vers'] ) {
 			return;
 		}
+
+		$cible['vers'] = with_query( $cible['vers'], (string) ( $_SERVER['REQUEST_URI'] ?? '' ) );
 
 		if ( ! empty( $cible['externe'] ) ) {
 			/*
